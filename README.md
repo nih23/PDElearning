@@ -14,6 +14,6 @@ also requires training of several neural networks. You might borrow some ideas f
 
 Team:
 Ludwig Schulze
-Michael Wernthalere
+Michael Wernthaler
 Patrick Stiller
 Nico Hoffmann
