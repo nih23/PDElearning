@@ -18,10 +18,11 @@ from argparse import ArgumentParser
 import os
 import sys
 import pathlib
+import torch.nn.functional as F
 
 
 class SchrodingerNet(nn.Module):
-    def __init__(self, numLayers, numFeatures, lb, ub, samplingX, samplingY, activation=torch.tanh):
+    def __init__(self, numLayers, numFeatures, numLayers_hpm, numFeatures_hpm, lb, ub, samplingX, samplingY, activation=torch.tanh, activation_hpm=F.relu):
         """
         This function creates the components of the Neural Network and saves the datasets
         :param x0: Position x at time zero
@@ -35,10 +36,17 @@ class SchrodingerNet(nn.Module):
         """
         torch.manual_seed(1234)
         super(SchrodingerNet, self).__init__()
+
         self.numLayers = numLayers
         self.numFeatures = numFeatures
         self.lin_layers = nn.ModuleList()
         self.activation = activation
+
+        self.numLayers_hpm = numLayers_hpm
+        self.numFeatures_hpm = numFeatures_hpm
+        self.lin_layers_hpm = nn.ModuleList()
+        self.activation_hpm = activation_hpm
+
         self.lb = torch.Tensor(lb).float().cuda()
         self.ub = torch.Tensor(ub).float().cuda()
     
@@ -74,6 +82,7 @@ class SchrodingerNet(nn.Module):
         :param self:
         :return:
         """
+
         self.lin_layers.append(nn.Linear(3, self.numFeatures))
         for _ in range(self.numLayers):
             inFeatures = self.numFeatures
@@ -81,6 +90,17 @@ class SchrodingerNet(nn.Module):
         self.lin_layers.append(nn.Linear(inFeatures, 2))
 
         for m in self.lin_layers:
+            if isinstance(m, nn.Linear):
+                nn.init.xavier_normal_(m.weight)
+                nn.init.constant_(m.bias, 0)
+
+        self.lin_layers_hpm.append(nn.Linear(11, self.numFeatures))
+        for _ in range(self.numLayers_hpm):
+            inFeatures = self.numFeatures_hpm
+            self.lin_layers_hpm.append(nn.Linear(inFeatures, self.numFeatures_hpm))
+        self.lin_layers_hpm.append(nn.Linear(inFeatures, 2))
+
+        for m in self.lin_layers_hpm:
             if isinstance(m, nn.Linear):
                 nn.init.xavier_normal_(m.weight)
                 nn.init.constant_(m.bias, 0)
@@ -148,6 +168,14 @@ class SchrodingerNet(nn.Module):
 
         return x
 
+    def forward_hpm(x):
+        for i in range(len(self.lin_layers_hpm)):
+            x = self.lin_layers_hpm[i](x)
+            x = self.activation_hpm(x)
+        x = self.lin_layers_hpm[-1](x)
+
+        return x
+
     def net_pde(self, x, y, t, gamma=1.):
         """
         Calculates the quality of the pde estimation
@@ -162,11 +190,10 @@ class SchrodingerNet(nn.Module):
         ###deprecated PINN computation:
         ###f_u = -1 * u_t - 0.5 * v_xx - 0.5 * v_yy + gamma* 0.5 * (x ** 2) * v + gamma * 0.5 *  (y ** 2) * v
         ###f_v = -1 * v_t + 0.5 * u_xx + 0.5 * u_yy - gamma* 0.5 * (x ** 2) * u - gamma * 0.5 * (y ** 2) * u
+        X = torch.stack([x, y, t, u, v, u_yy, v_yy, u_xx, v_xx, u_t, v_t], 1)
 
-        # sketch
-        f_u, f_v = [-1 * u_t, 1 * v_] - tself.forward_hpm(gamma,u,v,x,y,u_xx,v_xx, ...)
+        f_u, f_v = [-1 * u_t, 1 * v_t] - self.forward_hpm(X)
 
-        #done
         return u, v, f_u, f_v
 
     def solution_loss(self, x, y, t, u0, v0):
