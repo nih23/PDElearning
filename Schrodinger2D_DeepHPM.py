@@ -440,6 +440,8 @@ if __name__ == "__main__":
     initSize = args.initSize
     numLayers = args.numLayers
     numFeatures = args.numFeatures
+    numLayers_hpm = args.numLayers_hpm
+    numFeatures_hpm = args.numFeatures_hpm
     numEpochsSolution = args.epochsSolution
     numEpochsPDE = args.epochsPDE
     activateEnergyLoss = args.energyLoss
@@ -461,7 +463,7 @@ if __name__ == "__main__":
 
     activation = torch.tanh
 
-    model = SchrodingerNet(numLayers, numFeatures, ds.lb, ds.ub, numOfEnergySamplingPointsX, numOfEnergySamplingPointsY, torch.tanh).cuda()
+    model = SchrodingerNet(numLayers, numFeatures, numLayers_hpm, numFeatures_hpm, ds.lb, ds.ub, numOfEnergySamplingPointsX, numOfEnergySamplingPointsY, torch.tanh).cuda()
 
     optimizer = optim.Adam(model.parameters(), lr=3e-5)
     optimizer = hvd.DistributedOptimizer(optimizer,
