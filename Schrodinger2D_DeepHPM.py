@@ -413,6 +413,8 @@ if __name__ == "__main__":
     parser.add_argument("--initsize", dest="initSize", type=int)
     parser.add_argument("--numlayers", dest="numLayers", type=int)
     parser.add_argument("--numfeatures", dest="numFeatures", type=int)
+    parser.add_argument("--numlayers_hpm", dest="numLayers_hpm", type=int)
+    parser.add_argument("--numfeatures_hpm", dest="numFeatures_hpm", type=int)
     parser.add_argument("--epochssolution", dest="epochsSolution", type=int)
     parser.add_argument("--epochsPDE", dest="epochsPDE", type=int)
     parser.add_argument("--energyloss", dest="energyLoss",type=int)

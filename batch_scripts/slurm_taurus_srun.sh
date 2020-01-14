@@ -28,7 +28,7 @@ cd /scratch/p_da_aipp/2D_Schrodinger/2D_Schrodinger
 
 srun --output="run_w_$SLURM_JOB_ID.log" which python3.6
 
-srun --output="run_$SLURM_JOB_ID.log" python3.6 Schrodinger2D_nh_hvd_v2.py --identifier e1_singlenet \
+srun --output="run_$SLURM_JOB_ID.log" python3.6 ../Schrodinger2D_DeepHPM.py --identifier e1_singlenet \
                                 --batchsize 10000 \
                                 --numbatches 240 \
                                 --initsize 7000 \
@@ -36,5 +36,7 @@ srun --output="run_$SLURM_JOB_ID.log" python3.6 Schrodinger2D_nh_hvd_v2.py --ide
                                 --epochsPDE 7000 \
                                 --energyloss 0 \
                                 --pretraining 1 \
-                                --noFeatures 700 \
-                                --noLayers 8
+                                --numfeatures 700 \
+                                --numlayers 8 \
+                                --numfeatures_hpm 700 \
+                                --numlayers_hpm 8
