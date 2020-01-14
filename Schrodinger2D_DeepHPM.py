@@ -107,8 +107,9 @@ class SchrodingerNet(nn.Module):
 
     def net_uv(self, x, y, t):
         """
-        Function that calculates the nn output at postion x at time t
+        Function that calculates the nn output at postion x,y at time t
         :param x: position
+        :param y: position
         :param t: time
         :return: Solutions and their gradients
         """
@@ -180,6 +181,7 @@ class SchrodingerNet(nn.Module):
         """
         Calculates the quality of the pde estimation
         :param x postion x
+        :param y postion y
         :param t time t
         """
         u, v, u_yy, v_yy, u_xx, v_xx, u_t, v_t = self.net_uv(x, y, t)
