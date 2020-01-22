@@ -187,11 +187,7 @@ class SchrodingerNet(nn.Module):
         u, v, u_yy, v_yy, u_xx, v_xx, u_t, v_t = self.net_uv(x, y, t)
         x = x.view(-1)
         y = y.view(-1)
-        #TODO: replace computation of f_u, f_v by simple feed forward networks
-        #begin
-        ###deprecated PINN computation:
-        ###f_u = -1 * u_t - 0.5 * v_xx - 0.5 * v_yy + gamma* 0.5 * (x ** 2) * v + gamma * 0.5 *  (y ** 2) * v
-        ###f_v = -1 * v_t + 0.5 * u_xx + 0.5 * u_yy - gamma* 0.5 * (x ** 2) * u - gamma * 0.5 * (y ** 2) * u
+
         X = torch.stack([x, y, t, u, v, u_yy, v_yy, u_xx, v_xx, u_t, v_t], 1)
 
         f_u, f_v = [-1 * u_t, 1 * v_t] - self.forward_hpm(X)
@@ -246,17 +242,28 @@ class SchrodingerNet(nn.Module):
         pdeLoss = torch.mean((solU - u0) ** 2) + torch.mean((solV - v0) ** 2) + torch.mean(f_u ** 2) + torch.mean(f_v ** 2)
         return pdeLoss
 
-    def ec_pde_loss(self, x0, y0, t0, u0, v0, xf, yf, tf, xe, ye, te, c, samplingX, samplingY,activateEnergyLoss=True, alpha=1.):
+    def hpm_loss(self, x, y, t, Ex_u, Ex_v):
+        """
+        Returns the quality HPM net
+        """
+
+        x = x.view(-1)
+        y = y.view(-1)
+        t = t.view(-1)
+
+        u, v, f_u, f_v = self.net_pde(x, y, t)
+
+        Ex_u = Ex_u.view(-1)
+        Ex_v = Ex_v.view(-1)
+
+        hpmLoss = torch.mean((u - Ex_u) ** 2) + torch.mean((v - Ex_v) ** 2) + torch.mean(f_u ** 2) + torch.mean(f_v ** 2)
+        return hpmLoss
+
+    def ec_pde_loss(self, xf, yf, tf, uf, vf, c, samplingX, samplingY,activateEnergyLoss=True, alpha=1.):
     
-        x0 = x0.view(-1)
-        y0 = y0.view(-1)
-        t0 = t0.view(-1)
         xf = xf.view(-1)
         yf = yf.view(-1)
         tf = tf.view(-1)
-        xe = xe.view(-1)
-        ye = ye.view(-1)
-        te = te.view(-1)
 
         n0 = x0.shape[0]
         nf = xf.shape[0]
@@ -490,27 +497,21 @@ if __name__ == "__main__":
 
     for epoch in range(numEpochsPDE):
 
-        for x0, y0, t0, Ex_u, Ex_v, xf, yf, tf, xe, ye, te in train_loader:
+        for x, y, t, Ex_u, Ex_v in train_loader:
             optimizer.zero_grad()
 
             # calculate loss
             
-            loss = model.ec_pde_loss(x0,
-                                     y0,
-                                     t0,
-                                     Ex_u,
-                                     Ex_v,
-                                     xf,
-                                     yf,
-                                     tf,
-                                     xe,
-                                     ye,
-                                     te,
-                                     1.,
-                                     numOfEnergySamplingPointsX,
-                                     numOfEnergySamplingPointsY,
-                                     activateEnergyLoss,
-                                     args.alpha)
+            loss = model.hpm_loss(x,
+                                  y,
+                                  t,
+                                  Ex_u,
+                                  Ex_v,
+                                  1.,
+                                  numOfEnergySamplingPointsX,
+                                  numOfEnergySamplingPointsY,
+                                  activateEnergyLoss,
+                                  args.alpha)
             loss.backward()
             optimizer.step()
 
