@@ -436,8 +436,8 @@ if __name__ == "__main__":
     
     #adapter of commandline parameters
 
-    modelPath = '/projects/p_electron/stiller/schrodinger/models/' + args.identifier + '/'
-    logdir = '/projects/p_electron/stiller/schrodinger/runs/experiments/' + args.identifier
+    modelPath = '~/projects/schrodinger/models/' + args.identifier + '/'
+    logdir = '~/projects/schrodinger/runs/experiments/' + args.identifier
     batchSizePDE = args.batchsize
     useGPU = True
     numBatches = args.numBatches
