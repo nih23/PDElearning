@@ -405,7 +405,7 @@ if __name__ == "__main__":
 
     coordinateSystem = {"x_lb": xmin, "x_ub": xmax, "y_lb": ymin, "y_ub" : ymax, "nx": nx , "ny": ny, "nt": nt, "dt": dt}
 
-    pData = 'data/'
+    pData = '../data/'
     batchSizeInit = 2500  #for the balanced dataset is not needed
 
     parser = ArgumentParser()
