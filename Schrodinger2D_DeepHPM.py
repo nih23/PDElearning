@@ -9,7 +9,7 @@ import scipy.io
 from torch.autograd import Variable
 import torch.optim as optim
 from enum import Enum
-from SchrodingerBalancedECDataset import SchrodingerEquationDataset
+from BaselineDataset import SchrodingerEquationDataset
 import matplotlib.pyplot as plt
 import torch.utils.data.distributed
 import horovod.torch as hvd
