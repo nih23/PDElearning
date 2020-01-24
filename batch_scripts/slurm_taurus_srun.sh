@@ -36,7 +36,7 @@ srun --output="run_$SLURM_JOB_ID.log" python3.6 ../Schrodinger2D_DeepHPM.py --id
                                 --epochssolution 1000 \
                                 --epochsPDE 7000 \
                                 --energyloss 0 \
-                                --pretraining 1 \
+                                --pretraining 0 \
                                 --numfeatures 700 \
                                 --numlayers 8 \
                                 --numfeatures_hpm 700 \
