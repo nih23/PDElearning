@@ -483,10 +483,10 @@ if __name__ == "__main__":
 
     if pretraining:
         for epoch in range(numEpochsSolution):
-            for x0, y0, t0, Ex_u, Ex_v, xf, yf, tf, xe, ye, te in train_loader:
+            for x, y, t, Ex_u, Ex_v in train_loader:
                 optimizer.zero_grad()
                 # calculate loss
-                loss = model.solution_loss(x0, y0, t0, Ex_u, Ex_v)
+                loss = model.solution_loss(x, y, t, Ex_u, Ex_v)
                 loss.backward()
                 optimizer.step()
             if epoch % 30 == 0:
