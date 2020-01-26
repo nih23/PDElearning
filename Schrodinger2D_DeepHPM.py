@@ -466,7 +466,7 @@ if __name__ == "__main__":
     log_writer = SummaryWriter(logdir) if hvd.rank() == 0 else None
 
     # create dataset
-    ds = SchrodingerEquationDataset(pData, coordinateSystem, numOfEnergySamplingPointsX, numOfEnergySamplingPointsY, initSize, numBatches, batchSizePDE, shuffle=True, useGPU=True,do_lhs=args.lhs)
+    ds = SchrodingerEquationDataset(pData, coordinateSystem,  numBatches, batchSizePDE, shuffle=True, useGPU=True)
 
     # Partition dataset among workers using DistributedSampler
     train_sampler = torch.utils.data.distributed.DistributedSampler(ds, num_replicas=hvd.size(), rank=hvd.rank())
