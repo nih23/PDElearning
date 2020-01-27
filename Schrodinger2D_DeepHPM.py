@@ -506,12 +506,7 @@ if __name__ == "__main__":
                                   y,
                                   t,
                                   Ex_u,
-                                  Ex_v,
-                                  1.,
-                                  numOfEnergySamplingPointsX,
-                                  numOfEnergySamplingPointsY,
-                                  activateEnergyLoss,
-                                  args.alpha)
+                                  Ex_v)
             loss.backward()
             optimizer.step()
 
