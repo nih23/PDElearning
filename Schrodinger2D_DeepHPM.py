@@ -170,7 +170,7 @@ class SchrodingerNet(nn.Module):
         return x
 
     def forward_hpm(self, x):
-        for i in range(len(self.lin_layers_hpm)):
+        for i in range(0, len(self.lin_layers_hpm) - 1):
             x = self.lin_layers_hpm[i](x)
             x = self.activation_hpm(x)
         x = self.lin_layers_hpm[-1](x)
