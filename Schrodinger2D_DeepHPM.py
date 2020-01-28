@@ -190,7 +190,9 @@ class SchrodingerNet(nn.Module):
 
         X = torch.stack([x, y, t, u, v, u_yy, v_yy, u_xx, v_xx, u_t, v_t], 1)
 
-        f_u, f_v = [-1 * u_t, 1 * v_t] - self.forward_hpm(X)
+        z = torch.stack([-1 * u_t, 1 * v_t], 1) - self.forward_hpm(X)
+        f_u = z[:, :1]
+        f_v = z[:, 1:]
 
         return u, v, f_u, f_v
 
