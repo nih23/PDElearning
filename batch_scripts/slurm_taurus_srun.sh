@@ -1,7 +1,8 @@
 #!/bin/bash -l
 
 #SBATCH -p ml
-#SBATCH -t 24:00:00
+#SBATCH -A p_da_aipp
+#SBATCH -t 6:00:00
 #SBATCH --hint=multithread
 #SBATCH --nodes=1
 #SBATCH --ntasks=4
@@ -34,7 +35,7 @@ srun --output="run_$SLURM_JOB_ID.log" python3.6 ../Schrodinger2D_DeepHPM.py --id
                                 --numbatches 80 \
                                 --initsize 7000 \
                                 --epochssolution 1000 \
-                                --epochsPDE 7000 \
+                                --epochsPDE 1000 \
                                 --energyloss 0 \
                                 --pretraining 0 \
                                 --numfeatures 700 \
