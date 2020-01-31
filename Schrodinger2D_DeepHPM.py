@@ -404,10 +404,10 @@ if __name__ == "__main__":
     nx = 200
     ny = 200
     nt = 1000
-    xmin = -10
-    xmax = 10
-    ymin = -10
-    ymax = 10
+    xmin = -2.5
+    xmax = 2.5
+    ymin = -2.5
+    ymax = 2.5
     dt = 0.001
     numOfEnergySamplingPointsX = 100
     numOfEnergySamplingPointsY = 100
@@ -445,8 +445,8 @@ if __name__ == "__main__":
     
     #adapter of commandline parameters
 
-    modelPath = '~/projects/schrodinger/models/' + args.identifier + '/'
-    logdir = '~/projects/schrodinger/runs/experiments/' + args.identifier
+    modelPath = '/home/s4386479/projects/schrodinger/models/' + args.identifier + '/'
+    logdir = '/home/s4386479/projects/schrodinger/runs/experiments/' + args.identifier
     batchSizePDE = args.batchsize
     useGPU = True
     numBatches = args.numBatches
@@ -528,7 +528,7 @@ if __name__ == "__main__":
             if log_writer:
                 log_writer.add_histogram('First Layer Grads', model.lin_layers[0].weight.grad.view(-1, 1), epoch)
                 save_checkpoint(model, optimizer, modelPath, epoch)
-
+'''
     if log_writer:
         hParams = {'numLayers': numLayers,
                    'numFeatures': numFeatures,
@@ -546,3 +546,4 @@ if __name__ == "__main__":
                   'hparam/valLoss500': valLoss500}
 
         log_writer.add_hparams(hParams, metric)
+'''
