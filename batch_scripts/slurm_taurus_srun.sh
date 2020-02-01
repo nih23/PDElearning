@@ -2,10 +2,10 @@
 
 #SBATCH -p ml
 #SBATCH -A p_da_aipp
-#SBATCH -t 20:00:00
+#SBATCH -t 6:00:00
 #SBATCH --hint=multithread
-#SBATCH --nodes=3
-#SBATCH --ntasks=18
+#SBATCH --nodes=1
+#SBATCH --ntasks=6
 #SBATCH --cpus-per-task=28
 #SBATCH --mem=0
 #SBATCH --gres=gpu:6
@@ -31,11 +31,11 @@ echo "MPIRANK: $SLURM_PROVID"
 srun --output="run_w_$SLURM_JOB_ID.log" which python3.6
 
 srun --output="run_$SLURM_JOB_ID.log" python3.6 ../Schrodinger2D_DeepHPM.py --identifier e1_singlenet \
-                                --batchsize 10000 \
-                                --numbatches 500 \
+                                --batchsize 1000 \
+                                --numbatches 50 \
                                 --initsize 7000 \
                                 --epochssolution 1000 \
-                                --epochsPDE 2000 \
+                                --epochsPDE 500 \
                                 --energyloss 0 \
                                 --pretraining 0 \
                                 --numfeatures 700 \
