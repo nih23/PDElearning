@@ -28,9 +28,9 @@ echo "MPIRANK: $SLURM_PROVID"
 
 # cd /scratch/p_da_aipp/2D_Schrodinger/2D_Schrodinger
 
-srun --output="run_w_$SLURM_JOB_ID.log" which python3.6
+# srun --output="run_w_$SLURM_JOB_ID.log" which python3.6
 
-srun --output="run_$SLURM_JOB_ID.log" python3.6 ../Schrodinger2D_DeepHPM.py --identifier e1_singlenet \
+srun --output="run_$SLURM_JOB_ID.log" python3.6 ../src/Schrodinger/Schrodinger2D_DeepHPM.py --identifier hpm_schrodinger \
                                 --batchsize 1000 \
                                 --numbatches 50 \
                                 --initsize 7000 \

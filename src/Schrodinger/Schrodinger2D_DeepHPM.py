@@ -9,7 +9,9 @@ import scipy.io
 from torch.autograd import Variable
 import torch.optim as optim
 from enum import Enum
-from SchrodingerBalancedECDataset import SchrodingerEquationDataset
+
+from Schrodinger.Dataset.Baseline import SchrodingerEquationDataset
+
 import matplotlib.pyplot as plt
 import torch.utils.data.distributed
 import horovod.torch as hvd
@@ -18,10 +20,11 @@ from argparse import ArgumentParser
 import os
 import sys
 import pathlib
+import torch.nn.functional as F
 
 
 class SchrodingerNet(nn.Module):
-    def __init__(self, numLayers, numFeatures, lb, ub, samplingX, samplingY, activation=torch.tanh):
+    def __init__(self, numLayers, numFeatures, numLayers_hpm, numFeatures_hpm, lb, ub, samplingX, samplingY, activation=torch.tanh, activation_hpm=F.relu):
         """
         This function creates the components of the Neural Network and saves the datasets
         :param x0: Position x at time zero
@@ -35,10 +38,17 @@ class SchrodingerNet(nn.Module):
         """
         torch.manual_seed(1234)
         super(SchrodingerNet, self).__init__()
+
         self.numLayers = numLayers
         self.numFeatures = numFeatures
         self.lin_layers = nn.ModuleList()
         self.activation = activation
+
+        self.numLayers_hpm = numLayers_hpm
+        self.numFeatures_hpm = numFeatures_hpm
+        self.lin_layers_hpm = nn.ModuleList()
+        self.activation_hpm = activation_hpm
+
         self.lb = torch.Tensor(lb).float().cuda()
         self.ub = torch.Tensor(ub).float().cuda()
     
@@ -74,6 +84,7 @@ class SchrodingerNet(nn.Module):
         :param self:
         :return:
         """
+
         self.lin_layers.append(nn.Linear(3, self.numFeatures))
         for _ in range(self.numLayers):
             inFeatures = self.numFeatures
@@ -85,10 +96,22 @@ class SchrodingerNet(nn.Module):
                 nn.init.xavier_normal_(m.weight)
                 nn.init.constant_(m.bias, 0)
 
+        self.lin_layers_hpm.append(nn.Linear(11, self.numFeatures))
+        for _ in range(self.numLayers_hpm):
+            inFeatures = self.numFeatures_hpm
+            self.lin_layers_hpm.append(nn.Linear(inFeatures, self.numFeatures_hpm))
+        self.lin_layers_hpm.append(nn.Linear(inFeatures, 2))
+
+        for m in self.lin_layers_hpm:
+            if isinstance(m, nn.Linear):
+                nn.init.xavier_normal_(m.weight)
+                nn.init.constant_(m.bias, 0)
+
     def net_uv(self, x, y, t):
         """
-        Function that calculates the nn output at postion x at time t
+        Function that calculates the nn output at postion x,y at time t
         :param x: position
+        :param y: position
         :param t: time
         :return: Solutions and their gradients
         """
@@ -148,18 +171,31 @@ class SchrodingerNet(nn.Module):
 
         return x
 
+    def forward_hpm(self, x):
+        for i in range(0, len(self.lin_layers_hpm) - 1):
+            x = self.lin_layers_hpm[i](x)
+            x = self.activation_hpm(x)
+        x = self.lin_layers_hpm[-1](x)
+
+        return x
+
     def net_pde(self, x, y, t, gamma=1.):
         """
         Calculates the quality of the pde estimation
         :param x postion x
+        :param y postion y
         :param t time t
         """
         u, v, u_yy, v_yy, u_xx, v_xx, u_t, v_t = self.net_uv(x, y, t)
         x = x.view(-1)
         y = y.view(-1)
 
-        f_u = -1 * u_t - 0.5 * v_xx - 0.5 * v_yy + gamma* 0.5 * (x ** 2) * v + gamma * 0.5 *  (y ** 2) * v
-        f_v = -1 * v_t + 0.5 * u_xx + 0.5 * u_yy - gamma* 0.5 * (x ** 2) * u - gamma * 0.5 * (y ** 2) * u
+        X = torch.stack([x, y, t, u, v, u_yy, v_yy, u_xx, v_xx, u_t, v_t], 1)
+
+        f = torch.stack([-1 * u_t, -1 * v_t], 1) - self.forward_hpm(X)
+        f_u = f[:, 0]
+        f_v = f[:, 1]
+
         return u, v, f_u, f_v
 
     def solution_loss(self, x, y, t, u0, v0):
@@ -210,17 +246,28 @@ class SchrodingerNet(nn.Module):
         pdeLoss = torch.mean((solU - u0) ** 2) + torch.mean((solV - v0) ** 2) + torch.mean(f_u ** 2) + torch.mean(f_v ** 2)
         return pdeLoss
 
-    def ec_pde_loss(self, x0, y0, t0, u0, v0, xf, yf, tf, xe, ye, te, c, samplingX, samplingY,activateEnergyLoss=True, alpha=1.):
+    def hpm_loss(self, x, y, t, Ex_u, Ex_v):
+        """
+        Returns the quality HPM net
+        """
+
+        x = x.view(-1)
+        y = y.view(-1)
+        t = t.view(-1)
+
+        u, v, f_u, f_v = self.net_pde(x, y, t)
+
+        Ex_u = Ex_u.view(-1)
+        Ex_v = Ex_v.view(-1)
+
+        hpmLoss = torch.mean((u - Ex_u) ** 2) + torch.mean((v - Ex_v) ** 2) + torch.mean(f_u ** 2) + torch.mean(f_v ** 2)
+        return hpmLoss
+
+    def ec_pde_loss(self, xf, yf, tf, uf, vf, c, samplingX, samplingY,activateEnergyLoss=True, alpha=1.):
     
-        x0 = x0.view(-1)
-        y0 = y0.view(-1)
-        t0 = t0.view(-1)
         xf = xf.view(-1)
         yf = yf.view(-1)
         tf = tf.view(-1)
-        xe = xe.view(-1)
-        ye = ye.view(-1)
-        te = te.view(-1)
 
         n0 = x0.shape[0]
         nf = xf.shape[0]
@@ -359,17 +406,17 @@ if __name__ == "__main__":
     nx = 200
     ny = 200
     nt = 1000
-    xmin = -10
-    xmax = 10
-    ymin = -10
-    ymax = 10
+    xmin = -2.5
+    xmax = 2.5
+    ymin = -2.5
+    ymax = 2.5
     dt = 0.001
     numOfEnergySamplingPointsX = 100
     numOfEnergySamplingPointsY = 100
 
     coordinateSystem = {"x_lb": xmin, "x_ub": xmax, "y_lb": ymin, "y_ub" : ymax, "nx": nx , "ny": ny, "nt": nt, "dt": dt}
 
-    pData = 'data/'
+    pData = '../data/'
     batchSizeInit = 2500  #for the balanced dataset is not needed
 
     parser = ArgumentParser()
@@ -379,6 +426,8 @@ if __name__ == "__main__":
     parser.add_argument("--initsize", dest="initSize", type=int)
     parser.add_argument("--numlayers", dest="numLayers", type=int)
     parser.add_argument("--numfeatures", dest="numFeatures", type=int)
+    parser.add_argument("--numlayers_hpm", dest="numLayers_hpm", type=int)
+    parser.add_argument("--numfeatures_hpm", dest="numFeatures_hpm", type=int)
     parser.add_argument("--epochssolution", dest="epochsSolution", type=int)
     parser.add_argument("--epochsPDE", dest="epochsPDE", type=int)
     parser.add_argument("--energyloss", dest="energyLoss",type=int)
@@ -398,14 +447,16 @@ if __name__ == "__main__":
     
     #adapter of commandline parameters
 
-    modelPath = '/projects/p_electron/stiller/schrodinger/models/' + args.identifier + '/'
-    logdir = '/projects/p_electron/stiller/schrodinger/runs/experiments/' + args.identifier
+    modelPath = '/home/s4386479/projects/schrodinger/models/' + args.identifier + '/'
+    logdir = '/home/s4386479/projects/schrodinger/runs/experiments/' + args.identifier
     batchSizePDE = args.batchsize
     useGPU = True
     numBatches = args.numBatches
     initSize = args.initSize
     numLayers = args.numLayers
     numFeatures = args.numFeatures
+    numLayers_hpm = args.numLayers_hpm
+    numFeatures_hpm = args.numFeatures_hpm
     numEpochsSolution = args.epochsSolution
     numEpochsPDE = args.epochsPDE
     activateEnergyLoss = args.energyLoss
@@ -419,7 +470,7 @@ if __name__ == "__main__":
     log_writer = SummaryWriter(logdir) if hvd.rank() == 0 else None
 
     # create dataset
-    ds = SchrodingerEquationDataset(pData, coordinateSystem, numOfEnergySamplingPointsX, numOfEnergySamplingPointsY, initSize, numBatches, batchSizePDE, shuffle=True, useGPU=True,do_lhs=args.lhs)
+    ds = SchrodingerEquationDataset(pData, coordinateSystem,  numBatches, batchSizePDE, shuffle=True, useGPU=True)
 
     # Partition dataset among workers using DistributedSampler
     train_sampler = torch.utils.data.distributed.DistributedSampler(ds, num_replicas=hvd.size(), rank=hvd.rank())
@@ -427,7 +478,7 @@ if __name__ == "__main__":
 
     activation = torch.tanh
 
-    model = SchrodingerNet(numLayers, numFeatures, ds.lb, ds.ub, numOfEnergySamplingPointsX, numOfEnergySamplingPointsY, torch.tanh).cuda()
+    model = SchrodingerNet(numLayers, numFeatures, numLayers_hpm, numFeatures_hpm, ds.lb, ds.ub, numOfEnergySamplingPointsX, numOfEnergySamplingPointsY, torch.tanh).cuda()
 
     optimizer = optim.Adam(model.parameters(), lr=3e-5)
     optimizer = hvd.DistributedOptimizer(optimizer,
@@ -436,10 +487,10 @@ if __name__ == "__main__":
 
     if pretraining:
         for epoch in range(numEpochsSolution):
-            for x0, y0, t0, Ex_u, Ex_v, xf, yf, tf, xe, ye, te in train_loader:
+            for x, y, t, Ex_u, Ex_v in train_loader:
                 optimizer.zero_grad()
                 # calculate loss
-                loss = model.solution_loss(x0, y0, t0, Ex_u, Ex_v)
+                loss = model.solution_loss(x, y, t, Ex_u, Ex_v)
                 loss.backward()
                 optimizer.step()
             if epoch % 30 == 0:
@@ -450,27 +501,16 @@ if __name__ == "__main__":
 
     for epoch in range(numEpochsPDE):
 
-        for x0, y0, t0, Ex_u, Ex_v, xf, yf, tf, xe, ye, te in train_loader:
+        for x, y, t, Ex_u, Ex_v in train_loader:
             optimizer.zero_grad()
 
             # calculate loss
             
-            loss = model.ec_pde_loss(x0,
-                                     y0,
-                                     t0,
-                                     Ex_u,
-                                     Ex_v,
-                                     xf,
-                                     yf,
-                                     tf,
-                                     xe,
-                                     ye,
-                                     te,
-                                     1.,
-                                     numOfEnergySamplingPointsX,
-                                     numOfEnergySamplingPointsY,
-                                     activateEnergyLoss,
-                                     args.alpha)
+            loss = model.hpm_loss(x,
+                                  y,
+                                  t,
+                                  Ex_u,
+                                  Ex_v)
             loss.backward()
             optimizer.step()
 
@@ -490,7 +530,7 @@ if __name__ == "__main__":
             if log_writer:
                 log_writer.add_histogram('First Layer Grads', model.lin_layers[0].weight.grad.view(-1, 1), epoch)
                 save_checkpoint(model, optimizer, modelPath, epoch)
-
+'''
     if log_writer:
         hParams = {'numLayers': numLayers,
                    'numFeatures': numFeatures,
@@ -508,3 +548,4 @@ if __name__ == "__main__":
                   'hparam/valLoss500': valLoss500}
 
         log_writer.add_hparams(hParams, metric)
+'''
