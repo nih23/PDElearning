@@ -76,8 +76,8 @@ class SchrodingerNet(nn.Module):
         # building the neural network
         self.init_layers()
 
-        # Creating Weight Matrix for energy conservation mechanism
-
+        
+        
     def init_layers(self):
         """
         This function creates the torch layers and initialize them with xavier
@@ -128,30 +128,24 @@ class SchrodingerNet(nn.Module):
         v = UV[:, 1]
 
         grads = torch.ones([dim]).cuda()
+        # compute first-order partial derivative by automatic differentiation
+        J_U = torch.autograd.grad(u,[x,y,t], create_graph=True, grad_outputs=grads)
+        J_V = torch.autograd.grad(v,[x,y,t], create_graph=True, grad_outputs=grads)
+    
+        u_x = J_U[0].reshape([dim])
+        u_y = J_U[1].reshape([dim])
+        u_t = J_U[2].reshape([dim])
 
-        # huge change to the tensorflow implementation this function returns all neccessary gradients
-        u_x = torch.autograd.grad(u, x, create_graph=True, grad_outputs=grads)[0]
-        v_x = torch.autograd.grad(v, x, create_graph=True, grad_outputs=grads)[0]
+        v_x = J_V[0].reshape([dim])
+        v_y = J_V[1].reshape([dim])
+        v_t = J_V[2].reshape([dim])
 
-        u_y = torch.autograd.grad(u, y, create_graph=True, grad_outputs=grads)[0]
-        v_y = torch.autograd.grad(v, y, create_graph=True, grad_outputs=grads)[0]
-
-        u_x = u_x.reshape([dim])
-        v_x = v_x.reshape([dim])
-        u_y = u_x.reshape([dim])
-        v_y = v_x.reshape([dim])
-
-        u_t = torch.autograd.grad(u, t, create_graph=True, grad_outputs=grads)[0]
-        v_t = torch.autograd.grad(v, t, create_graph=True, grad_outputs=grads)[0]
-
+		# compute second order partial derivative
         u_xx = torch.autograd.grad(u_x, x, create_graph=True, grad_outputs=grads)[0]
         v_xx = torch.autograd.grad(v_x, x, create_graph=True, grad_outputs=grads)[0]
 
         u_yy = torch.autograd.grad(u_y, y, create_graph=True, grad_outputs=grads)[0]
         v_yy = torch.autograd.grad(v_y, y, create_graph=True, grad_outputs=grads)[0]
-
-        u_t = u_t.reshape([dim])
-        v_t = v_t.reshape([dim])
 
         u_xx = u_xx.reshape([dim])
         v_xx = v_xx.reshape([dim])
@@ -160,16 +154,16 @@ class SchrodingerNet(nn.Module):
 
         return u, v, u_yy, v_yy, u_xx, v_xx, u_t, v_t
 
+
     def forward(self, x):
         x = 2.0 * (x - self.lb) / (self.ub - self.lb) - 1.0
         for i in range(0, len(self.lin_layers) - 1):
             x = self.lin_layers[i](x)
             x = self.activation(x)
-            # x = torch.sin(x)
-            # x = F.tanh(x)
         x = self.lin_layers[-1](x)
 
         return x
+
 
     def forward_hpm(self, x):
         for i in range(0, len(self.lin_layers_hpm) - 1):
@@ -178,6 +172,7 @@ class SchrodingerNet(nn.Module):
         x = self.lin_layers_hpm[-1](x)
 
         return x
+
 
     def net_pde(self, x, y, t, gamma=1.):
         """
@@ -198,6 +193,7 @@ class SchrodingerNet(nn.Module):
 
         return u, v, f_u, f_v
 
+
     def solution_loss(self, x, y, t, u0, v0):
         """
         Returns the quality of the net
@@ -217,34 +213,6 @@ class SchrodingerNet(nn.Module):
         loss = torch.mean((u0 - u) ** 2) + torch.mean(v ** 2)
         return loss
 
-    def pde_loss(self, x0, y0, t0, u0, v0, xf, yf, tf):
-        """
-        Returns the quality of the net
-        """
-
-        x0 = x0.view(-1)
-        y0 = y0.view(-1)
-        t0 = t0.view(-1)
-        xf = xf.view(-1)
-        yf = yf.view(-1)
-        tf = tf.view(-1)
-
-        n0 = x0.shape[0]
-
-        inputX = torch.cat([x0, xf])
-        inputY = torch.cat([y0, yf])
-        inputT = torch.cat([t0, tf])
-
-        u, v, f_u, f_v = self.net_pde(inputX, inputY, inputT)
-
-        solU = u[:n0]
-        solV = v[:n0]
-
-        u0 = u0.view(-1)
-        v0 = v0.view(-1)
-
-        pdeLoss = torch.mean((solU - u0) ** 2) + torch.mean((solV - v0) ** 2) + torch.mean(f_u ** 2) + torch.mean(f_v ** 2)
-        return pdeLoss
 
     def hpm_loss(self, x, y, t, Ex_u, Ex_v):
         """
@@ -262,62 +230,6 @@ class SchrodingerNet(nn.Module):
 
         hpmLoss = torch.mean((u - Ex_u) ** 2) + torch.mean((v - Ex_v) ** 2) + torch.mean(f_u ** 2) + torch.mean(f_v ** 2)
         return hpmLoss
-
-    def ec_pde_loss(self, xf, yf, tf, uf, vf, c, samplingX, samplingY,activateEnergyLoss=True, alpha=1.):
-    
-        xf = xf.view(-1)
-        yf = yf.view(-1)
-        tf = tf.view(-1)
-
-        n0 = x0.shape[0]
-        nf = xf.shape[0]
-
-        inputX = torch.cat([x0, xf, xe])
-        inputY = torch.cat([y0, yf, ye])
-        inputT = torch.cat([t0, tf, te])
-
-        u, v, f_u, f_v = self.net_pde(inputX, inputY, inputT)
-
-        solU = u[:n0]
-        solV = v[:n0]
-
-        eU = u[n0 + nf:]
-        eV = v[n0 + nf:]
-        eH = eU ** 2 + eV ** 2
-
-        lowerX = self.lb[0]
-        higherX = self.ub[0]
-
-        lowerY = self.lb[1]
-        higherY = self.ub[1]
-
-        disX = (higherX - lowerX) / samplingX
-        disY = (higherY - lowerY) / samplingY
-
-        u0 = u0.view(-1)
-        v0 = v0.view(-1)
-        integral = 0.25 * disX * disY * torch.sum(eH * self.W)
-        # calculte integral over field for energy conservation
-        eLoss = (integral - c) ** 2
-
-        pdeLoss = alpha * torch.mean((solU - u0) ** 2) + \
-                  torch.mean((solV - v0) ** 2) + \
-                  torch.mean(f_u ** 2) + \
-                  torch.mean(f_v ** 2)
-        if activateEnergyLoss:
-            pdeLoss = pdeLoss + eLoss
-
-        if epoch % 30 == 0:
-            if log_writer:
-                log_writer.add_scalar('Solution U', torch.mean((solU - u0) ** 2), epoch)
-                log_writer.add_scalar('Solution V', torch.mean((solV - v0) ** 2), epoch)
-                log_writer.add_scalar('Real PDE', torch.mean(f_u ** 2), epoch)
-                log_writer.add_scalar('Imaginary PDE', torch.mean(f_v ** 2), epoch)
-                log_writer.add_scalar('Energy Loss', eLoss, epoch)
-                log_writer.add_scalar('PDE Loss', pdeLoss, epoch)
-                log_writer.add_scalar('Integral', integral, epoch)
-
-        return pdeLoss
 
 
 def writeIntermediateState(timeStep, model, epoch, nx, ny, fileWriter,csystem):
@@ -420,22 +332,18 @@ if __name__ == "__main__":
     batchSizeInit = 2500  #for the balanced dataset is not needed
 
     parser = ArgumentParser()
-    parser.add_argument("--identifier", dest="identifier", type=str)
-    parser.add_argument("--batchsize", dest="batchsize", type=int)
-    parser.add_argument("--numbatches", dest="numBatches", type=int)
-    parser.add_argument("--initsize", dest="initSize", type=int)
-    parser.add_argument("--numlayers", dest="numLayers", type=int)
-    parser.add_argument("--numfeatures", dest="numFeatures", type=int)
-    parser.add_argument("--numlayers_hpm", dest="numLayers_hpm", type=int)
-    parser.add_argument("--numfeatures_hpm", dest="numFeatures_hpm", type=int)
-    parser.add_argument("--epochssolution", dest="epochsSolution", type=int)
-    parser.add_argument("--epochsPDE", dest="epochsPDE", type=int)
-    parser.add_argument("--energyloss", dest="energyLoss",type=int)
-    parser.add_argument("--pretraining", dest="pretraining", type=int)
-    parser.add_argument("--alpha",dest="alpha",type=float)
-    parser.add_argument("--lhs",dest="lhs",type=int)
-    #parser.add_argument("--postprocessing", dest='postprocessing', type=int)
-
+    parser.add_argument("--identifier", dest="identifier", type=str, default="S2D_DeepHPM")
+    parser.add_argument("--batchsize", dest="batchsize", type=int, default=10000)
+    parser.add_argument("--numbatches", dest="numBatches", type=int, default=500)
+    parser.add_argument("--numlayers", dest="numLayers", type=int, default=8)
+    parser.add_argument("--numfeatures", dest="numFeatures", type=int, default=8)
+    parser.add_argument("--numlayers_hpm", dest="numLayers_hpm", type=int, default=3)
+    parser.add_argument("--numfeatures_hpm", dest="numFeatures_hpm", type=int, default=100)
+    parser.add_argument("--t_ic_tanh",dest="t_ic",type=float, default = 1e-5)
+    parser.add_argument("--t_pde",dest="t_pde",type=float, default = 1e-5)
+    parser.add_argument("--pretraining", dest="pretraining", type=int, default=1)
+    parser.add_argument("--alpha",dest="alpha",type=float, default=12)
+    parser.add_argument("--lhs",dest="lhs",type=int, default=0)
     args = parser.parse_args()
 
     if hvd.rank() == 0: 
@@ -452,7 +360,6 @@ if __name__ == "__main__":
     batchSizePDE = args.batchsize
     useGPU = True
     numBatches = args.numBatches
-    initSize = args.initSize
     numLayers = args.numLayers
     numFeatures = args.numFeatures
     numLayers_hpm = args.numLayers_hpm
@@ -486,26 +393,35 @@ if __name__ == "__main__":
                                          backward_passes_per_step=1)
 
     if pretraining:
-        for epoch in range(numEpochsSolution):
+        """
+        approximate full simulation
+        """
+    	epoch = 0
+       	l_loss = 1
+        while(l_loss > args.t_ic):
+        	epoch+=1
             for x, y, t, Ex_u, Ex_v in train_loader:
                 optimizer.zero_grad()
                 # calculate loss
                 loss = model.solution_loss(x, y, t, Ex_u, Ex_v)
                 loss.backward()
                 optimizer.step()
+            l_loss = loss.item()
             if epoch % 30 == 0:
                 print("Loss at Epoch " + str(epoch) + ": " + str(loss.item()))
 
+    """
+    learn non-linear operator N 
+    """
+	# we need to significantly reduce the learning rate [default: 9e-6]
     for paramGroup in optimizer.param_groups:
         paramGroup['lr'] = 1e-6
 
-    for epoch in range(numEpochsPDE):
-
+    l_loss = 1
+    while(l_loss > args.t_pde):
+		epoch+=1
         for x, y, t, Ex_u, Ex_v in train_loader:
-            optimizer.zero_grad()
-
-            # calculate loss
-            
+            optimizer.zero_grad()           
             loss = model.hpm_loss(x,
                                   y,
                                   t,
@@ -513,7 +429,8 @@ if __name__ == "__main__":
                                   Ex_v)
             loss.backward()
             optimizer.step()
-
+        
+        l_loss = loss.item()
         if epoch % 30 == 0:
             writeIntermediateState(0, model, epoch, nx, ny, log_writer,coordinateSystem)
             writeIntermediateState(100, model, epoch, nx, ny, log_writer,coordinateSystem)
@@ -530,22 +447,3 @@ if __name__ == "__main__":
             if log_writer:
                 log_writer.add_histogram('First Layer Grads', model.lin_layers[0].weight.grad.view(-1, 1), epoch)
                 save_checkpoint(model, optimizer, modelPath, epoch)
-'''
-    if log_writer:
-        hParams = {'numLayers': numLayers,
-                   'numFeatures': numFeatures,
-                   'ResidualPoints': numBatches * batchSizePDE,
-                   'alpha':args.alpha,
-                   'ELoss': activateEnergyLoss}
-
-        valLoss0 = valLoss(model, 0, coordinateSystem)
-        valLoss250 = valLoss(model, 250, coordinateSystem)
-        valLoss500 = valLoss(model, 500, coordinateSystem)
-
-        metric = {'hparam/SimLoss': loss.item(),
-                  'hparam/valLoss0': valLoss0,
-                  'hparam/valLoss250': valLoss250,
-                  'hparam/valLoss500': valLoss500}
-
-        log_writer.add_hparams(hParams, metric)
-'''
