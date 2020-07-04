@@ -345,7 +345,7 @@ class SchrodingerNet(nn.Module):
 
         X = torch.stack([x, y, t, u, v, u_yy, v_yy, u_xx, v_xx, u_t, v_t], 1)
 
-        f = torch.stack([-1 * u_t, -1 * v_t], 1) - self.forward_hpm(X)
+        f = torch.stack([u_t, v_t], 1) - self.forward_hpm(X)
         f_u = f[:, 0]
         f_v = f[:, 1]
 
@@ -368,7 +368,7 @@ class SchrodingerNet(nn.Module):
         u0 = u0.view(-1)
         v0 = v0.view(-1)
 
-        loss = torch.mean((u0 - u) ** 2) + torch.mean(v ** 2)
+        loss = torch.mean((u0 - u) ** 2) + torch.mean((v0 - v) ** 2)
         return loss
 
 
@@ -477,10 +477,10 @@ def runNN(identifier = "S2D_DeepHPM", batchsize = 10000, numBatches = 500, numLa
     nx = 200
     ny = 200
     nt = 1000
-    xmin = -2.5
-    xmax = 2.5
-    ymin = -2.5
-    ymax = 2.5
+    xmin = -3
+    xmax = 3
+    ymin = -3
+    ymax = 3
     dt = 0.001
     numOfEnergySamplingPointsX = 100
     numOfEnergySamplingPointsY = 100
