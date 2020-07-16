@@ -17,7 +17,7 @@ from enum import Enum
 
 import matplotlib.pyplot as plt
 import torch.utils.data.distributed
-#import horovod.torch as hvd
+import horovod.torch as hvd
 from tensorboardX import SummaryWriter
 from argparse import ArgumentParser
 import os
@@ -179,7 +179,7 @@ class SchrodingerEquationDataset(Dataset):
         return self.numBatches
 
 
-pData = '~/GPU_Schroedinger/data/'
+pData = './data/'
 
 class SchrodingerNet(nn.Module):
     def __init__(self, numLayers, numFeatures, numLayers_hpm, numFeatures_hpm, lb, ub, samplingX, samplingY, activation=torch.tanh, activation_hpm=F.relu):
@@ -390,7 +390,7 @@ class SchrodingerNet(nn.Module):
         return hpmLoss
 
 
-def writeIntermediateState(timeStep, model, epoch, nx, ny, fileWriter,csystem):
+def writeIntermediateState(timeStep, model, epoch, nx, ny, fileWriter,csystem, pretraining = False):
     if fileWriter:
         x, y, t = SchrodingerEquationDataset.getInput(timeStep,csystem)
         x = torch.Tensor(x).float().cuda()
@@ -408,22 +408,30 @@ def writeIntermediateState(timeStep, model, epoch, nx, ny, fileWriter,csystem):
         fig = plt.figure()
         plt.imshow(u, cmap='jet')
         plt.colorbar()
-        fileWriter.add_figure('Real_' + str(timeStep), fig, epoch)
+        if not pretraining:
+            fileWriter.add_figure('Real_' + str(timeStep), fig, epoch)
+        else: 
+            fileWriter.add_figure('Real_pretraining_' + str(timeStep), fig, epoch)
         plt.close(fig)
 
         fig = plt.figure()
         plt.imshow(v, cmap='jet')
         plt.colorbar()
-        fileWriter.add_figure('Imaginary_' + str(timeStep), fig, epoch)
+        if not pretraining:
+            fileWriter.add_figure('Imaginary_' + str(timeStep), fig, epoch)
+        else: 
+            fileWriter.add_figure('Imaginary_pretraining_' + str(timeStep), fig, epoch)
         plt.close(fig)
 
         fig = plt.figure()
         plt.imshow(h, cmap='jet')
         plt.colorbar()
-        fileWriter.add_figure('Norm_' + str(timeStep), fig, epoch)
+        if not pretraining:
+            fileWriter.add_figure('Norm_' + str(timeStep), fig, epoch)
+        else: 
+            fileWriter.add_figure('Norm_pretraining_' + str(timeStep), fig, epoch)
         plt.close(fig)
-
-
+        
 def valLoss(model, timeStep, csystem):
     x, y, t = SchrodingerEquationDataset.getInput(timeStep,csystem)
     x = torch.Tensor(x).float().cuda()
@@ -436,18 +444,58 @@ def valLoss(model, timeStep, csystem):
     vPred = UV[:, 1]
 
     # load label data
+    uPred = uPred.reshape([csystem['nx']*csystem['ny'],])
+    vPred = vPred.reshape([csystem['nx']*csystem['ny'],])
+    # load label data
     uVal, vVal = SchrodingerEquationDataset.loadFrame(pData, timeStep)
-    uVal = np.array(uVal)
-    vVal = np.array(vVal)
+    uVal = np.array(uVal).reshape([csystem['nx']*csystem['ny'],])
+    vVal = np.array(vVal).reshape([csystem['nx']*csystem['ny'],])
 
     valLoss = np.mean((uVal - uPred) ** 2) + np.mean((vVal - vPred) ** 2)
     return valLoss
+    
+def norms(model, timeStep, csystem):
+    x, y, t = SchrodingerEquationDataset.getInput(timeStep,csystem)
+    x = torch.Tensor(x).float().cuda()
+    y = torch.Tensor(y).float().cuda()
+    t = torch.Tensor(t).float().cuda()
 
+    inputX = torch.stack([x, y, t], 1)
+    UV = model.forward(inputX).detach().cpu().numpy()
+    uPred = UV[:, 0]
+    vPred = UV[:, 1]
 
-def writeValidationLoss(model, writer, timeStep, epoch, csystem):
+    # load label data
+    uPred = uPred.reshape([csystem['nx']*csystem['ny'],])
+    vPred = vPred.reshape([csystem['nx']*csystem['ny'],])
+    # load label data
+    uVal, vVal = SchrodingerEquationDataset.loadFrame(pData, timeStep)
+    uVal = np.array(uVal).reshape([csystem['nx']*csystem['ny'],])
+    vVal = np.array(vVal).reshape([csystem['nx']*csystem['ny'],])
+
+    norm2 = np.linalg.norm(uVal - uPred,2)
+    norminf = np.linalg.norm(uVal - uPred,np.inf)
+    
+    return norm2, norminf
+
+def writeValidationLoss(model, writer, timeStep, epoch, csystem, pretraining = False):
     if writer:
         loss = valLoss(model, timeStep,csystem)
-        writer.add_scalar("ValidationLoss_" + str(timeStep), loss, epoch)
+        if not pretraining:
+            writer.add_scalar("ValidationLoss_" + str(timeStep), loss, epoch)
+        else: 
+            writer.add_scalar("ValidationLoss_pretraining_" + str(timeStep), loss, epoch)
+        
+def writeNorm(model, writer, timeStep, epoch, csystem, pretraining = False):
+    if writer:
+        norm2, norminf = norms(model, timeStep,csystem)
+        if pretraining:
+            writer.add_scalar("Norm_2_pretraining_" + str(timeStep), norm2, epoch)
+            writer.add_scalar("Norm_inf_pretraining_" + str(timeStep), norminf, epoch)
+        else: 
+            writer.add_scalar("Norm_2_" + str(timeStep), norm2, epoch)
+            writer.add_scalar("Norm_inf_" + str(timeStep), norminf, epoch)
+
 
 
 def save_checkpoint(model, optimizer, path, epoch):
@@ -464,14 +512,13 @@ def load_checkpoint(model, optimizer, path):
     optimizer.load_state_dict(checkpoint['optimizer'])
 
 
-def runNN(identifier = "S2D_DeepHPM", batchsize = 10000, numBatches = 500, numLayers = 8,  numFeatures = 300, numLayers_hpm = 3, 
-          numFeatures_hpm = 300, t_ic = 1e-5, t_pde = 1e-5, pretraining = True, alpha = 12, lhs = 0):
-    #batchsize = 10000
-    # Initialize Horovod
-    #hvd.init()
+def runNN(identifier = "S2D_DeepHPM", batchsize = 10000, numBatches = 300, numLayers = 8, numFeatures = 300, numLayers_hpm = 3, t_ic = 1e-5, t_pde = 1e-5, pretraining = False, alpha = 12, lhs = 0):
 
+    # Initialize Horovod
+    hvd.init()
+    numFeatures_hpm = numFeatures
     # Pin GPU to be used to process local rank (one GPU per process)
-    #torch.cuda.set_device(hvd.local_rank())
+    torch.cuda.set_device(hvd.local_rank())
 
     # static parameter
     nx = 200
@@ -487,83 +534,52 @@ def runNN(identifier = "S2D_DeepHPM", batchsize = 10000, numBatches = 500, numLa
 
     coordinateSystem = {"x_lb": xmin, "x_ub": xmax, "y_lb": ymin, "y_ub" : ymax, "nx": nx , "ny": ny, "nt": nt, "dt": dt}
 
-    #pData = '../data/'
-    pData = '~/GPU_Schroedinger/data/'
+    pData = './data/'
 
     batchSizeInit = 2500  #for the balanced dataset is not needed
 
-    #parser = ArgumentParser()
-    #parser.add_argument("--identifier", dest="identifier", type=str, default="S2D_DeepHPM")
-    #parser.add_argument("--batchsize", dest="batchsize", type=int, default=10000)
-    #parser.add_argument("--numbatches", dest="numBatches", type=int, default=500)
-    #parser.add_argument("--numlayers", dest="numLayers", type=int, default=8)
-    #parser.add_argument("--numfeatures", dest="numFeatures", type=int, default=8)
-    #parser.add_argument("--numlayers_hpm", dest="numLayers_hpm", type=int, default=3)
-    #parser.add_argument("--numfeatures_hpm", dest="numFeatures_hpm", type=int, default=100)
-    #parser.add_argument("--t_ic_tanh",dest="t_ic",type=float, default = 1e-5)
-    #parser.add_argument("--t_pde",dest="t_pde",type=float, default = 1e-5)
-    #parser.add_argument("--pretraining", dest="pretraining", type=int, default=1)
-    #parser.add_argument("--alpha",dest="alpha",type=float, default=12)
-    #parser.add_argument("--lhs",dest="lhs",type=int, default=0)
-    #args = parser.parse_args()
-
-    #if hvd.rank() == 0: 
-    #    print("-" * 10 + "-" * len(args.identifier) + "-" * 10)
-    #    print("-" * 10 +  args.identifier + "-" * 10)
-    #    print("-" * 10 + "-" * len(args.identifier) + "-" * 10)
+    if hvd.rank() == 0: 
+        print("-" * 10 + "-" * len(identifier) + "-" * 10)
+        print("-" * 10 + identifier + "-" * 10)
+        print("-" * 10 + "-" * len(identifier) + "-" * 10)
     
-    #print("Rank",hvd.rank(),"Local Rank", hvd.local_rank())
+    print("Rank",hvd.rank(),"Local Rank", hvd.local_rank())
     
     #adapter of commandline parameters
 
-    #modelPath = '/home/s4386479/projects/schrodinger/models/' + identifier + '/'
-    #logdir = '/home/s4386479/projects/schrodinger/runs/experiments/' + identifier
-    modelPath = '~/GPU_Schroedinger/models/' + str((identifier)) + '/'
-    logdir = '~/GPU_Schroedinger/experiments/' + \
-        str((identifier)) + '/'  # str((args.identifier)) + '/'
-    norms = '~/GPU_Schroedinger/norm.txt'
-    #with open(norms, 'w') as f:
-    #  f.write('L2 norm' + '              L_inf norm' + '\n')
-
+    modelPath = './models/' + str((identifier)) + '/'
+    logdir = './experiments/' + str((identifier)) + '/'  
 
     batchSizePDE = batchsize
     useGPU = True
-    
-    #numBatches = numBatches
-    #numLayers = numLayers
-    #numFeatures = numFeatures
-    #numLayers_hpm = numLayers_hpm
-    #numFeatures_hpm = numFeatures_hpm
-    #activateEnergyLoss = energyLoss
-    #postprocessing = args.postprocessing
 
     #create modelpath
-    #if hvd.rank() == 0:
-    pathlib.Path(modelPath).mkdir(parents=True, exist_ok=True) 
+    if hvd.rank() == 0:
+    	pathlib.Path(modelPath).mkdir(parents=True, exist_ok=True) 
     # create logWriter
-    log_writer = SummaryWriter(logdir) #if hvd.rank() == 0 else None
+    log_writer = SummaryWriter(logdir) if hvd.rank() == 0 else None
 
     # create dataset
     ds = SchrodingerEquationDataset(pData, coordinateSystem,  numBatches, batchSizePDE, shuffle=True, useGPU=True)
 
     # Partition dataset among workers using DistributedSampler
-    train_sampler = torch.utils.data.distributed.DistributedSampler(ds, num_replicas=1, rank=1) #, num_replicas=hvd.size(), rank=hvd.rank())
-    train_loader = torch.utils.data.DataLoader(ds, batch_size=1) #, sampler=train_sampler)
-    #return train_loader
+    train_sampler = torch.utils.data.distributed.DistributedSampler(ds, num_replicas=hvd.size(), rank=hvd.rank())
+    train_loader = torch.utils.data.DataLoader(ds, batch_size=1, sampler = train_sampler)
     activation = torch.tanh
 
     model = SchrodingerNet(numLayers, numFeatures, numLayers_hpm, numFeatures_hpm, ds.lb, ds.ub, numOfEnergySamplingPointsX, numOfEnergySamplingPointsY, torch.tanh).cuda()
-    optimizer = optim.Adam(model.parameters(), lr=3e-5)
-    load_checkpoint(model, optimizer, '~/GPU_Schroedinger/model_660')
-    #optimizer = hvd.DistributedOptimizer(optimizer,
-    #                                     named_parameters=model.named_parameters(),
-    #                                     backward_passes_per_step=1)
+
+    optimizer = optim.Adam(model.parameters(), lr=1e-8)
+    load_checkpoint(model, optimizer, './models/S2D_DeepHPM/model_5400')
+    optimizer = hvd.DistributedOptimizer(optimizer,
+                                         named_parameters=model.named_parameters(),
+                                         backward_passes_per_step=1)
 
     if pretraining:
 
       epoch = 0
       l_loss = 1
-      while(l_loss > t_ic):
+      while(epoch < 20000):
         epoch+=1
         for x, y, t, u, v in train_loader:
             optimizer.zero_grad()
@@ -572,7 +588,24 @@ def runNN(identifier = "S2D_DeepHPM", batchsize = 10000, numBatches = 500, numLa
             loss.backward()
             optimizer.step()
         l_loss = loss.item()
-        if epoch % 30 == 0:
+        if epoch % 200 == 0:
+            
+            writeIntermediateState(0, model, epoch, nx, ny, log_writer,coordinateSystem, pretraining)
+            writeIntermediateState(250, model, epoch, nx, ny, log_writer,coordinateSystem, pretraining)
+            writeIntermediateState(500, model, epoch, nx, ny, log_writer,coordinateSystem, pretraining)
+            writeIntermediateState(750, model, epoch, nx, ny, log_writer,coordinateSystem, pretraining)
+            writeIntermediateState(1000, model, epoch, nx, ny, log_writer,coordinateSystem, pretraining)
+            writeValidationLoss(model, log_writer, 0, epoch,coordinateSystem, pretraining)
+            writeValidationLoss(model, log_writer, 250, epoch,coordinateSystem, pretraining)
+            writeValidationLoss(model, log_writer, 500, epoch,coordinateSystem, pretraining)
+            writeValidationLoss(model, log_writer, 750, epoch,coordinateSystem, pretraining)
+            writeValidationLoss(model, log_writer, 1000, epoch,coordinateSystem, pretraining)
+            writeNorm(model, log_writer, 0, epoch, coordinateSystem, pretraining)
+            writeNorm(model, log_writer, 250, epoch, coordinateSystem, pretraining)
+            writeNorm(model, log_writer, 500, epoch, coordinateSystem, pretraining)
+            writeNorm(model, log_writer, 750, epoch, coordinateSystem, pretraining)
+            writeNorm(model, log_writer, 1000, epoch, coordinateSystem, pretraining)
+            
             print("Loss at Epoch " + str(epoch) + ": " + str(loss.item()))
 
     """
@@ -580,10 +613,15 @@ def runNN(identifier = "S2D_DeepHPM", batchsize = 10000, numBatches = 500, numLa
     """
 	# we need to significantly reduce the learning rate [default: 9e-6]
     for paramGroup in optimizer.param_groups:
-        paramGroup['lr'] = 1e-6
+        paramGroup['lr'] = 1e-8
 
     l_loss = 1
-    epoch = 660 #0
+    epoch = 5400
+    writeNorm(model, log_writer, 0, 0, coordinateSystem)
+    writeNorm(model, log_writer, 250, 0, coordinateSystem)
+    writeNorm(model, log_writer, 500, 0, coordinateSystem)
+    writeNorm(model, log_writer, 750, 0, coordinateSystem)
+    writeNorm(model, log_writer, 1000, 0, coordinateSystem)
 
     while(l_loss > t_pde):
       epoch += 1
@@ -600,26 +638,24 @@ def runNN(identifier = "S2D_DeepHPM", batchsize = 10000, numBatches = 500, numLa
 
       l_loss = loss.item()
 
-      if epoch % 30 == 0:
-
-          X = torch.stack([x[0], y[0], t[0]], 1)
-          UV = model.forward(X)
-          u1 = UV[:, 0]
-          v1 = UV[:, 1]
-            
-          with open(norms, 'a') as f:
-            f.write(str(torch.dist(u, u1, 2).item()) + '   ' + str(torch.max(torch.abs(u-u1)).item()) + '\n')
-
+      if epoch % 200 == 0:
 
           writeIntermediateState(0, model, epoch, nx, ny, log_writer,coordinateSystem)
-          writeIntermediateState(100, model, epoch, nx, ny, log_writer,coordinateSystem)
-          writeIntermediateState(200, model, epoch, nx, ny, log_writer,coordinateSystem)
           writeIntermediateState(250, model, epoch, nx, ny, log_writer,coordinateSystem)
-          writeIntermediateState(300, model, epoch, nx, ny, log_writer,coordinateSystem)
-          writeIntermediateState(400, model, epoch, nx, ny, log_writer,coordinateSystem)
           writeIntermediateState(500, model, epoch, nx, ny, log_writer,coordinateSystem)
+          writeIntermediateState(750, model, epoch, nx, ny, log_writer,coordinateSystem)
+          writeIntermediateState(1000, model, epoch, nx, ny, log_writer,coordinateSystem)
+          writeValidationLoss(model, log_writer, 0, epoch,coordinateSystem)
           writeValidationLoss(model, log_writer, 250, epoch,coordinateSystem)
           writeValidationLoss(model, log_writer, 500, epoch,coordinateSystem)
+          writeValidationLoss(model, log_writer, 750, epoch,coordinateSystem)
+          writeValidationLoss(model, log_writer, 1000, epoch,coordinateSystem)
+          writeNorm(model, log_writer, 0, epoch, coordinateSystem)
+          writeNorm(model, log_writer, 250, epoch, coordinateSystem)
+          writeNorm(model, log_writer, 500, epoch, coordinateSystem)
+          writeNorm(model, log_writer, 750, epoch, coordinateSystem)
+          writeNorm(model, log_writer, 1000, epoch, coordinateSystem)
+
           sys.stdout.flush()
 
           print("PDE Loss at Epoch: ", epoch + 1, loss.item())
@@ -627,4 +663,4 @@ def runNN(identifier = "S2D_DeepHPM", batchsize = 10000, numBatches = 500, numLa
               log_writer.add_histogram('First Layer Grads', model.lin_layers[0].weight.grad.view(-1, 1), epoch)
               save_checkpoint(model, optimizer, modelPath, epoch)
 
-runNN(pretraining = False, numLayers_hpm = 8, numFeatures_hpm = 300)
+runNN()
