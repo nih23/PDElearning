@@ -4,7 +4,26 @@ import torch
 import os
 import h5py
 from pyDOE import lhs
-import src.Schrodinger.Dataset.SchrodingerAnalytical as SchrodingerAnalytical
+import Schrodinger.Dataset.SchrodingerAnalytical as SchrodingerAnalytical
+
+
+def getDefaults():
+    # static parameter
+    nx = 200
+    ny = 200
+    nt = 1000
+    xmin = -3
+    xmax = 3
+    ymin = -3
+    ymax = 3
+    dt = 0.001
+    tmax = 1
+    numOfEnergySamplingPointsX = 100
+    numOfEnergySamplingPointsY = 100
+
+    coordinateSystem = {"x_lb": xmin, "x_ub": xmax, "y_lb": ymin, "y_ub" : ymax, "nx":nx , "ny":ny, "nt": nt, "dt": dt}
+
+    return coordinateSystem, numOfEnergySamplingPointsX, numOfEnergySamplingPointsY, tmax 
 
 
 # Calculates Schrodinger 2D at t=0 and its derivatives
@@ -51,6 +70,7 @@ class Schrodinger2DDerivatives():
     # Schrodinger 2D at t=0
     def base(self, x, y):
         return 1 / (2 ** (1 / 2)) * np.multiply(self.f0(y), self.f0(x)) + np.multiply(self.f1(y), self.f1(x))
+
 
 
 class SchrodingerEquationDataset(Dataset):
@@ -188,6 +208,112 @@ class SchrodingerEquationDataset(Dataset):
     def __len__(self):
         return self.numBatches
 
+    
+class SchrodingerHPMEquationDataset(SchrodingerEquationDataset):
+
+    @staticmethod
+    def loadFrame(pFile, discreteT):
+        """
+
+        :param pFile: place of the h5 files ending up with '/'
+        :param discretT: discrete time position
+        :return: returns real and imaginary part of the solution at discete time step discretT
+        """
+        # generate filename from parameters
+        filePath = pFile + 'step-' + str(discreteT) + '.h5'
+
+        if not os.path.exists(filePath):
+            raise FileNotFoundError('Could not find file' + filePath)
+
+        hf = h5py.File(filePath, 'r')
+        real = np.array(hf['real'][:])
+        imag = np.array(hf['imag'][:])
+
+        hf.close()
+        return real, imag
+
+    
+    def __init__(self, pData, cSystem, numBatches, batchSize, shuffle=True, useGPU=True):
+
+        # Load data for t0
+        self.lb = np.array([cSystem["x_lb"], cSystem["y_lb"], 0.])
+        self.ub = np.array([cSystem["x_ub"], cSystem["y_ub"], cSystem["nt"] * cSystem["dt"]])
+
+        self.u = []
+        self.v = []
+        self.t = []
+        self.x = []
+        self.y = []
+        for step in range(1):
+            Exact_u, Exact_v = self.loadFrame(pData, step)
+            Exact_u = Exact_u.reshape(cSystem["nx"], cSystem["ny"]).T.reshape(-1)
+            Exact_v = Exact_v.reshape(cSystem["nx"], cSystem["ny"]).T.reshape(-1)
+            posX, posY, posT = SchrodingerEquationDataset.getInput(step, cSystem)
+            self.u.append(Exact_u)
+            self.v.append(Exact_v)
+            self.x.append(posX)
+            self.y.append(posY)
+            self.t.append(posT)
+            
+        self.u = np.array(self.u).reshape(-1)
+        self.v = np.array(self.v).reshape(-1)
+        self.x = np.array(self.x).reshape(-1)
+        self.y = np.array(self.y).reshape(-1)
+        self.t = np.array(self.t).reshape(-1)
+
+        # sometimes we are loading less files than we specified by batchsize + numBatches 
+        # => adapt numBatches to real number of batches for avoiding empty batches
+        self.batchSize = batchSize
+        self.numSamples = min( (numBatches * batchSize, len(self.x) ) ) 
+        self.numBatches = self.numSamples // self.batchSize
+        
+        self.randomState = np.random.RandomState(seed=1234)
+        # Domain bounds
+
+        if (useGPU):
+            self.dtype = torch.cuda.FloatTensor
+            self.dtype2 = torch.cuda.LongTensor
+        else:
+            self.dtype = torch.FloatTensor
+            self.dtype2 = torch.LongTensor
+
+        if shuffle:
+            # this function shuffles the whole dataset
+
+            # generate random permutation idx
+
+            randIdx = self.randomState.permutation(self.x.shape[0])
+
+            # use random index
+            self.x = self.x[randIdx]
+            self.y = self.y[randIdx]
+            self.t = self.t[randIdx]
+            self.u = self.u[randIdx]
+            self.v = self.v[randIdx]
+
+
+        # sclice the array for training
+        self.x = self.x[:self.numSamples]
+        self.y = self.y[:self.numSamples]
+        self.t = self.t[:self.numSamples]
+        self.u = self.u[:self.numSamples]
+        self.v = self.v[:self.numSamples]
+
+
+    def __getitem__(self, index):
+        # generate batch for inital solution
+
+        x = self.dtype(self.x[index * self.batchSize: (index + 1) * self.batchSize])
+        y = self.dtype(self.y[index * self.batchSize: (index + 1) * self.batchSize])
+        t = self.dtype(self.t[index * self.batchSize: (index + 1) * self.batchSize])
+        u = self.dtype(self.u[index * self.batchSize: (index + 1) * self.batchSize])
+        v = self.dtype(self.v[index * self.batchSize: (index + 1) * self.batchSize])
+        return x, y, t, u, v
+
+    def __len__(self):
+        return self.numBatches
+    
+    
 
 class Schrodinger2DTimeSliceDataset(Dataset):
 

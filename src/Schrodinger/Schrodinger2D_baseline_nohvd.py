@@ -9,7 +9,7 @@ import scipy.io
 from torch.autograd import Variable
 import torch.optim as optim
 from enum import Enum
-from src.Schrodinger.Dataset.Schrodinger2DDatasets import SchrodingerEquationDataset
+from Schrodinger.Dataset.Schrodinger2DDatasets import SchrodingerEquationDataset
 import matplotlib.pyplot as plt
 import torch.utils.data.distributed
 from tensorboardX import SummaryWriter
@@ -38,8 +38,8 @@ class SchrodingerNet(nn.Module):
         self.lb = torch.Tensor(lb).float()
         self.ub = torch.Tensor(ub).float()
         if(self.useGPU):
-        	self.lb = self.lb.cuda()
-        	self.ub = self.ub.cuda()
+            self.lb = self.lb.cuda()
+            self.ub = self.ub.cuda()
         self.noFeatures = noFeatures
         self.noLayers = noLayers
         self.use_singlenet = use_singlenet
@@ -80,7 +80,7 @@ class SchrodingerNet(nn.Module):
         :param self:
         :return:
         """
-     
+        print("layers", self.noLayers)
         self.in_t.append(nn.Linear(3, self.noFeatures)) # time
         for _ in range(self.noLayers):
             self.in_t.append(nn.Linear(self.noFeatures, self.noFeatures))
@@ -311,16 +311,18 @@ def valLoss(model, timeStep, csystem):
     return valLoss_u, valLoss_v
 
 
-def writeValidationLoss(model, writer, timeStep, epoch, csystem):
-    if writer:
-        _, _, t = SchrodingerEquationDataset.getInput(timeStep,csystem)
-        t = torch.Tensor(t).float().cuda()
+def writeValidationLoss(timeStep, model, epoch, writer, csystem, identifier):
+    if writer is None:
+        return
         
-        valLoss_u, valLoss_v = valLoss(model, timeStep,csystem)
-        valLoss_uv = valLoss_u + valLoss_v
-        writer.add_scalar("L_PDE/u/t%.2f" % (t[0].cpu().numpy()), valLoss_u, epoch)
-        writer.add_scalar("L_PDE/v/t%.2f" % (t[0].cpu().numpy()), valLoss_v, epoch)
-        writer.add_scalar("L_PDE/uv/t%.2f" % (t[0].cpu().numpy()), valLoss_uv, epoch)
+    _, _, t = SchrodingerEquationDataset.getInput(timeStep,csystem)
+    t = torch.Tensor(t).float().cuda()
+
+    valLoss_u, valLoss_v = valLoss(model, timeStep,csystem)
+    valLoss_uv = valLoss_u + valLoss_v
+    writer.add_scalar("L_%s/u/t%.2f" % (identifier, t[0].cpu().numpy()), valLoss_u, epoch)
+    writer.add_scalar("L_%s/v/t%.2f" % (identifier, t[0].cpu().numpy()), valLoss_v, epoch)
+    writer.add_scalar("L_%s/uv/t%.2f" % (identifier, t[0].cpu().numpy()), valLoss_uv, epoch)
         
 
 
@@ -362,8 +364,8 @@ def getDefaults():
 if __name__ == "__main__":   
     parser = ArgumentParser()
     parser.add_argument("--identifier", dest="identifier", type=str, default="S2D_baseline")
-    parser.add_argument("--batchsize", dest="batchsize", type=int, default=5000)
-    parser.add_argument("--numbatches", dest="numBatches", type=int, default=500)
+    parser.add_argument("--batchsize", dest="batchsize", type=int, default=10000)
+    parser.add_argument("--numbatches", dest="numBatches", type=int, default=300)
     parser.add_argument("--epochsIC", dest="epochsSolution", type=int, default = 2000)
     parser.add_argument("--epochsPDE", dest="epochsPDE", type=int, default=50000)
     parser.add_argument("--initsize", dest="initSize", type=int, default=40000)
