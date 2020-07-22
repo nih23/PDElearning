@@ -191,7 +191,7 @@ class SchrodingerNet(nn.Module):
         u0 = u0.view(-1,1)
         v0 = v0.view(-1,1)
 
-        loss = (torch.mean((u0 - u) ** 2) + torch.mean(v ** 2))
+        loss = (torch.mean((u0 - u) ** 2) + torch.mean((v0 - v) ** 2))
 
         return loss
 
