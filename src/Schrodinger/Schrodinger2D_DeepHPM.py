@@ -1,4 +1,3 @@
-
 import numpy as np
 import time
 import torch
@@ -11,8 +10,8 @@ from torch.autograd import Variable
 import torch.optim as optim
 from enum import Enum
 
-from Schrodinger2DDatasets import SchrodingerHPMEquationDataset
-from Schrodinger2D_baseline_nohvd import getDefaults, writeIntermediateState, valLoss, save_checkpoint, load_checkpoint, writeValidationLoss, SchrodingerNet
+from Schrodinger.Dataset.Schrodinger2DDatasets import SchrodingerHPMEquationDataset
+from Schrodinger.Schrodinger2D_baseline_nohvd import getDefaults, writeIntermediateState, valLoss, save_checkpoint, load_checkpoint, writeValidationLoss, SchrodingerNet
 
 import matplotlib.pyplot as plt
 import torch.utils.data.distributed
