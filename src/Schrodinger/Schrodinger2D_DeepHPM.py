@@ -1,3 +1,4 @@
+
 import numpy as np
 import time
 import torch
@@ -10,9 +11,8 @@ from torch.autograd import Variable
 import torch.optim as optim
 from enum import Enum
 
-from Schrodinger.Dataset.Schrodinger2DDatasets import SchrodingerHPMEquationDataset
-from Schrodinger.Schrodinger2D_baseline_nohvd import getDefaults, writeIntermediateState, valLoss, save_checkpoint, load_checkpoint, writeValidationLoss, SchrodingerNet
-
+from Schrodinger2DDatasets import SchrodingerHPMEquationDataset
+from Schrodinger2D_baseline_nohvd import getDefaults, writeIntermediateState, valLoss, save_checkpoint, load_checkpoint, writeValidationLoss, SchrodingerNet
 
 import matplotlib.pyplot as plt
 import torch.utils.data.distributed
@@ -62,7 +62,7 @@ class SchrodingerHPMNet(SchrodingerNet):
         :return:
         """
 
-        self.lin_layers_hpm.append(nn.Linear(11, self.noFeatures_hpm))
+        self.lin_layers_hpm.append(nn.Linear(9, self.noFeatures_hpm))
         for _ in range(self.noLayers_hpm):
             self.lin_layers_hpm.append(nn.Linear(self.noFeatures_hpm, self.noFeatures_hpm))
         self.lin_layers_hpm.append(nn.Linear(self.noFeatures_hpm, 2))
@@ -94,7 +94,7 @@ class SchrodingerHPMNet(SchrodingerNet):
         x = x.view(-1)
         y = y.view(-1)
 
-        X = torch.stack([x, y, t, u, v, u_yy, v_yy, u_xx, v_xx, u_t, v_t], 1)
+        X = torch.stack([x, y, t, u, v, u_yy, v_yy, u_xx, v_xx], 1)
 
         f = torch.stack([-1 * u_t, -1 * v_t], 1) - self.forward_hpm(X)
         f_u = f[:, 0]
@@ -120,7 +120,7 @@ class SchrodingerHPMNet(SchrodingerNet):
         hpmLoss = torch.mean((u - Ex_u) ** 2) + torch.mean((v - Ex_v) ** 2) + torch.mean(f_u ** 2) + torch.mean(f_v ** 2)
         return hpmLoss
    
-    
+	    
 if __name__ == "__main__":
 
     # Initialize Horovod
@@ -131,15 +131,15 @@ if __name__ == "__main__":
 
     parser = ArgumentParser()
     parser.add_argument("--identifier", dest="identifier", type=str, default="S2D_DeepHPM")
-    parser.add_argument("--pData", dest="pData", type=str, default="data/Schrodinger/S2D_-3_to_3/")
+    parser.add_argument("--pData", dest="pData", type=str, default="/home/mazh408b/qho_analytical_-3_3/")
     parser.add_argument("--batchsize", dest="batchsize", type=int, default=10000)
-    parser.add_argument("--numbatches", dest="numBatches", type=int, default=500)
+    parser.add_argument("--numbatches", dest="numBatches", type=int, default=800)
     parser.add_argument("--numlayers", dest="numLayers", type=int, default=8)
-    parser.add_argument("--numfeatures", dest="numFeatures", type=int, default=8)
+    parser.add_argument("--numfeatures", dest="numFeatures", type=int, default=300)
     parser.add_argument("--numlayers_hpm", dest="numLayers_hpm", type=int, default=3)
     parser.add_argument("--numfeatures_hpm", dest="numFeatures_hpm", type=int, default=100)
-    parser.add_argument("--t_ic",dest="t_ic",type=float, default = 1e-4)
-    parser.add_argument("--t_pde",dest="t_pde",type=float, default = 1e-5)
+    parser.add_argument("--t_ic",dest="t_ic",type=float, default = 1e-6)
+    parser.add_argument("--t_pde",dest="t_pde",type=float, default = 1e-6)
     parser.add_argument("--pretraining", dest="pretraining", type=int, default=1)
     args = parser.parse_args()
 
@@ -168,17 +168,16 @@ if __name__ == "__main__":
     train_sampler = torch.utils.data.distributed.DistributedSampler(ds, num_replicas=hvd.size(), rank=hvd.rank())
     train_loader = torch.utils.data.DataLoader(ds, batch_size=1, sampler=train_sampler)
 
-
     model = SchrodingerHPMNet(args.numLayers, args.numFeatures, args.numLayers_hpm, args.numFeatures_hpm, ds.lb, ds.ub, 5, 5, activation).cuda()
 
-    optimizer = optim.Adam(model.parameters(), lr=1e-5)
+    optimizer = optim.Adam(model.parameters(), lr=1e-6)
     optimizer = hvd.DistributedOptimizer(optimizer,
                                          named_parameters=model.named_parameters(),
                                          backward_passes_per_step=1)
-
+    # load_checkpoint(model, './results/models/S2D_DeepHPM/1_pde/model_29000.pt')
     # broadcast parameters & optimizer state.
     hvd.broadcast_parameters(model.state_dict(), root_rank=0)
-    hvd.broadcast_optimizer_state(optim, root_rank=0)
+    hvd.broadcast_optimizer_state(optimizer, root_rank=0)
     
     if args.pretraining:
         """
@@ -187,7 +186,7 @@ if __name__ == "__main__":
         epoch = 0
         l_loss = 1
         start_time = time.time()
-        while(l_loss > args.t_ic):
+        while (l_loss > args.t_ic):   
             epoch+=1
             for x, y, t, Ex_u, Ex_v in train_loader:
                 optimizer.zero_grad()
@@ -196,20 +195,35 @@ if __name__ == "__main__":
                 loss.backward()
                 optimizer.step()
             l_loss = loss.item()
-            
-            if (epoch % 30 == 0) and log_writer:
-                print("[%d] IC loss: %.4e [%.2fs]" % (epoch, loss.item(), time.time() - start_time))
+
+            if (epoch % 100 == 0) and log_writer:
+                print("[%d] IC loss: %.4e [%.2fs]" % (epoch, l_loss, time.time() - start_time))
+                log_writer.add_scalar("loss_ic", l_loss, epoch)
                 writeValidationLoss(0, model, epoch, log_writer, coordinateSystem, identifier = "PT")
                 writeIntermediateState(0, model, epoch, log_writer, coordinateSystem, identifier = "PT")
+                writeValidationLoss(250, model, epoch, log_writer, coordinateSystem, identifier = "PT")
+                writeIntermediateState(250, model, epoch, log_writer, coordinateSystem, identifier = "PT")
+                writeValidationLoss(500, model, epoch, log_writer, coordinateSystem, identifier = "PT")
+                writeIntermediateState(500, model, epoch, log_writer, coordinateSystem, identifier = "PT")
+                writeValidationLoss(750, model, epoch, log_writer, coordinateSystem, identifier = "PT")
+                writeIntermediateState(750, model, epoch, log_writer, coordinateSystem, identifier = "PT")
+                writeValidationLoss(1000, model, epoch, log_writer, coordinateSystem, identifier = "PT")
+                writeIntermediateState(1000, model, epoch, log_writer, coordinateSystem, identifier = "PT")
 
-    save_checkpoint(model, modelPath+"0_ic/", epoch)
-                
+                save_checkpoint(model, modelPath+"0_ic/", epoch)
+       
+    if args.pretraining:
+        save_checkpoint(model, modelPath+"0_ic/", epoch)         
     """
     learn non-linear operator N 
     """
     # we need to significantly reduce the learning rate [default: 9e-6]
     for paramGroup in optimizer.param_groups:
-        paramGroup['lr'] = 9e-6
+        paramGroup['lr'] = 1e-6
+
+    # if learning process has been restarted
+    if not args.pretraining:
+        epoch = 16000 
 
     l_loss = 1
     start_time = time.time()
@@ -226,22 +240,25 @@ if __name__ == "__main__":
             optimizer.step()
         
         l_loss = loss.item()
-        if (epoch % 30 == 0) and log_writer:
-            print("[%d] PDE loss: %.4e [%.2fs]" % (epoch, loss.item(), time.time() - start_time))
+
+        if (epoch % 100 == 0) and log_writer:
+            writer.add_scalar("hpm_loss", l_loss, epoch)
+            print("[%d] PDE loss: %.4e [%.2fs] saved" % (epoch, loss.item(), time.time() - start_time))
             writeIntermediateState(0, model, epoch, log_writer, coordinateSystem, identifier = "PDE")
-            writeIntermediateState(100, model, epoch, log_writer, coordinateSystem, identifier = "PDE")
-            writeIntermediateState(200, model, epoch, log_writer, coordinateSystem, identifier = "PDE")
             writeIntermediateState(250, model, epoch, log_writer, coordinateSystem, identifier = "PDE")
-            writeIntermediateState(300, model, epoch, log_writer, coordinateSystem, identifier = "PDE")
-            writeIntermediateState(400, model, epoch, log_writer, coordinateSystem, identifier = "PDE")
             writeIntermediateState(500, model, epoch, log_writer, coordinateSystem, identifier = "PDE")
+            writeIntermediateState(750, model, epoch, log_writer, coordinateSystem, identifier = "PDE")
+            writeIntermediateState(1000, model, epoch, log_writer, coordinateSystem, identifier = "PDE")
             writeValidationLoss(0, model, epoch, log_writer, coordinateSystem, identifier = "PDE")
             writeValidationLoss(250, model, epoch, log_writer, coordinateSystem, identifier = "PDE")
             writeValidationLoss(500, model, epoch, log_writer, coordinateSystem, identifier = "PDE")
+            writeValidationLoss(750, model, epoch, log_writer, coordinateSystem, identifier = "PDE")
             writeValidationLoss(1000, model, epoch, log_writer, coordinateSystem, identifier = "PDE")
             sys.stdout.flush()
 
             log_writer.add_histogram('First Layer Grads', model.lin_layers_hpm[0].weight.grad.view(-1, 1), epoch)
                 
+            save_checkpoint(model, modelPath+"1_pde/", epoch)
+    
     save_checkpoint(model, modelPath+"1_pde/", epoch)
     print("--- converged ---")
