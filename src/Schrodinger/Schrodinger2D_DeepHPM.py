@@ -9,9 +9,10 @@ import scipy.io
 from torch.autograd import Variable
 import torch.optim as optim
 from enum import Enum
+from sklearn.linear_model import LinearRegression
 
-from Schrodinger.Dataset.Schrodinger2DDatasets import SchrodingerHPMEquationDataset
-from Schrodinger.Schrodinger2D_baseline_nohvd import getDefaults, writeIntermediateState, valLoss, save_checkpoint, load_checkpoint, writeValidationLoss, SchrodingerNet
+from Schrodinger2DDatasets import SchrodingerHPMEquationDataset
+from Schrodinger2D_baseline_nohvd import getDefaults, writeIntermediateState, valLoss, save_checkpoint, load_checkpoint, writeValidationLoss, SchrodingerNet, get_vars
 
 import matplotlib.pyplot as plt
 import torch.utils.data.distributed
@@ -22,7 +23,6 @@ import os
 import sys
 import pathlib
 import torch.nn.functional as F
-
 
 class SchrodingerHPMNet(SchrodingerNet):
     def __init__(self, numLayers, numFeatures, numLayers_hpm, numFeatures_hpm, lb, ub, samplingX, samplingY, activation=torch.tanh, activation_hpm=F.relu):
@@ -61,7 +61,7 @@ class SchrodingerHPMNet(SchrodingerNet):
         :return:
         """
 
-        self.lin_layers_hpm.append(nn.Linear(9, self.noFeatures_hpm))
+        self.lin_layers_hpm.append(nn.Linear(8, self.noFeatures_hpm))
         for _ in range(self.noLayers_hpm):
             self.lin_layers_hpm.append(nn.Linear(self.noFeatures_hpm, self.noFeatures_hpm))
         self.lin_layers_hpm.append(nn.Linear(self.noFeatures_hpm, 2))
@@ -93,13 +93,220 @@ class SchrodingerHPMNet(SchrodingerNet):
         x = x.view(-1)
         y = y.view(-1)
 
-        X = torch.stack([x, y, t, u, v, u_yy, v_yy, u_xx, v_xx], 1)
+        X = torch.stack([x, y, u, v, u_yy, v_yy, u_xx, v_xx], 1)
 
         f = torch.stack([-1 * u_t, -1 * v_t], 1) - self.forward_hpm(X)
         f_u = f[:, 0]
         f_v = f[:, 1]
 
         return u, v, f_u, f_v
+
+    def hpm_diff(self, x, y, t, fileWriter):
+        """
+	Calculates the quality of the pde estimation
+        :param x postion x
+        :param y postion y
+        :param t time t
+        """
+       	
+        x = x.view(-1)
+        y = y.view(-1)
+        t = t.view(-1)
+
+
+        u, v, u_yy, v_yy, u_xx, v_xx, u_t, v_t = self.net_uv(x, y, t)
+        x = x.view(-1)
+        y = y.view(-1)
+
+        X = torch.stack([x, y, u, v, u_yy, v_yy, u_xx, v_xx], 1)
+
+        f = -self.forward_hpm(X)
+       
+        f_u = f[:, 0]
+        f_v = f[:, 1]
+
+        f_u = f_u.cpu().detach().numpy().reshape(-1, 1)
+        f_v = f_v.cpu().detach().numpy().reshape(-1, 1)
+        u_t = u_t.cpu().detach().numpy().reshape(-1, 1)
+        v_t = v_t.cpu().detach().numpy().reshape(-1, 1)
+
+        fig = plt.figure()
+        plt.scatter(f_u, u_t)
+        plt.xlabel('HPM predicted')
+        plt.ylabel('du/dt')
+        fileWriter.add_figure('dudt ~ HPM', fig, epoch)
+        plt.close(fig)
+
+        fig = plt.figure()
+        plt.scatter(f_v, v_t)
+        plt.xlabel('HPM predicted')
+        plt.ylabel('dv/dt')
+        fileWriter.add_figure('dvdt ~ HPM', fig, epoch)
+        plt.close(fig)
+
+        return 0
+
+
+    def get_params(self, dataset, fileWriter, time = 0):
+        
+        #dvdt ~ u_xx
+        x,y,t,u,v,u_xx,u_yy,v_xx,v_yy = get_vars(u_xx = 1)
+        X = torch.stack([x, y, u, v, u_yy, v_yy, u_xx, v_xx], 1)
+        f = self.forward_hpm(X)
+        dvdt = - f[:, 1]
+        dvdt = dvdt.cpu().detach().numpy().reshape(-1, 1)
+        u_xx = u_xx.cpu().detach().numpy().reshape(-1, 1)
+        fig = plt.figure()
+        plt.scatter(u_xx, dvdt)
+       	plt.xlabel('u_xx')
+       	plt.ylabel('dv/dt')
+        fileWriter.add_figure('dvdt ~ u_xx', fig, epoch)
+        plt.close(fig)
+        reg_v_xx = LinearRegression().fit(u_xx, dvdt)
+        lambda_v_xx = reg_v_xx.coef_[0]
+
+       	#dvdt ~	u_yy
+        x,y,t,u,v,u_xx,u_yy,v_xx,v_yy = get_vars(u_yy = 1)
+        X = torch.stack([x, y, u, v, u_yy, v_yy, u_xx, v_xx], 1)
+        f = self.forward_hpm(X)
+        dvdt = - f[:, 1]
+        dvdt = dvdt.cpu().detach().numpy().reshape(-1, 1)
+        u_yy = u_yy.cpu().detach().numpy().reshape(-1, 1)
+        fig = plt.figure()
+        plt.scatter(u_yy, dvdt)
+        fileWriter.add_figure('dvdt ~ u_yy', fig, epoch)
+       	plt.xlabel('u_yy')
+       	plt.ylabel('dv/dt')
+        plt.close(fig)
+        reg_v_yy = LinearRegression().fit(u_yy, dvdt)
+        lambda_v_yy = reg_v_yy.coef_[0]
+
+       	#dvdt ~	u*x^2
+        x,y,t,u,v,u_xx,u_yy,v_xx,v_yy = get_vars(x = 1, u = 1)
+        X = torch.stack([x, y, u, v, u_yy, v_yy, u_xx, v_xx], 1)
+        f = self.forward_hpm(X)
+        dvdt = - f[:, 1]
+        dvdt = dvdt.cpu().detach().numpy().reshape(-1, 1)
+        u = u.cpu().detach().numpy().reshape(-1, 1)
+        x = x.cpu().detach().numpy().reshape(-1, 1)
+        fig = plt.figure()
+        plt.scatter(u*(x**2), dvdt)
+       	plt.xlabel('u *	x^2')
+       	plt.ylabel('dv/dt')
+        fileWriter.add_figure('dvdt ~ u*x^2', fig, epoch)
+        plt.close(fig)
+        reg_v_ux2 = LinearRegression().fit(u*(x**2), dvdt)
+        lambda_v_ux2 = reg_v_ux2.coef_[0]
+
+        #dvdt ~ u*y^2
+        x,y,t,u,v,u_xx,u_yy,v_xx,v_yy = get_vars(y = 1, u = 1)
+        X = torch.stack([x, y, u, v, u_yy, v_yy, u_xx, v_xx], 1)
+        f = self.forward_hpm(X)
+        dvdt = - f[:, 1]
+        dvdt = dvdt.cpu().detach().numpy().reshape(-1, 1)
+        u = u.cpu().detach().numpy().reshape(-1, 1)
+        y = y.cpu().detach().numpy().reshape(-1, 1)
+        fig = plt.figure()
+        plt.scatter(u*(y**2), dvdt)
+       	plt.xlabel('u *	y^2')
+       	plt.ylabel('dv/dt')
+        fileWriter.add_figure('dvdt ~ u*y^2', fig, epoch)
+        plt.close(fig)
+        reg_v_uy2 = LinearRegression().fit(u*(y**2), dvdt)
+        lambda_v_uy2 = reg_v_uy2.coef_[0]
+
+        #dudt ~ v_xx
+        x,y,t,u,v,u_xx,u_yy,v_xx,v_yy = get_vars(v_xx = 1)
+        X = torch.stack([x, y, u, v, u_yy, v_yy, u_xx, v_xx], 1)
+        f = self.forward_hpm(X)
+        dudt = - f[:,0]
+        dudt = dudt.cpu().detach().numpy().reshape(-1, 1)
+        v_xx = v_xx.cpu().detach().numpy().reshape(-1, 1)
+        fig = plt.figure()
+        plt.scatter(v_xx, dudt)
+       	plt.xlabel('v_xx')
+       	plt.ylabel('du/dt')
+        fileWriter.add_figure('dudt ~ v_xx', fig, epoch)
+        plt.close(fig)
+        reg_u_xx = LinearRegression().fit(v_xx, dudt)
+        lambda_u_xx = reg_u_xx.coef_[0]
+
+        #dudt ~ v_yy
+        x,y,t,u,v,u_xx,u_yy,v_xx,v_yy = get_vars(v_yy = 1)
+        X = torch.stack([x, y, u, v, u_yy, v_yy, u_xx, v_xx], 1)
+        f = self.forward_hpm(X)
+        dudt = - f[:, 0]
+        dudt = dudt.cpu().detach().numpy().reshape(-1, 1)
+        v_yy = v_yy.cpu().detach().numpy().reshape(-1, 1)
+        fig = plt.figure()
+        plt.scatter(v_yy, dudt)
+       	plt.xlabel('v_yy')
+       	plt.ylabel('du/dt')
+        fileWriter.add_figure('dudt ~ v_yy', fig, epoch)
+        plt.close(fig)
+        reg_u_yy = LinearRegression().fit(v_yy, dudt)
+        lambda_u_yy = reg_u_yy.coef_[0]
+
+        #dudt ~ v*x^2
+        x,y,t,u,v,u_xx,u_yy,v_xx,v_yy = get_vars(x = 1, v = 1)
+        X = torch.stack([x, y, u, v, u_yy, v_yy, u_xx, v_xx], 1)
+        f = self.forward_hpm(X)
+        dudt = - f[:, 0]
+        dudt = dudt.cpu().detach().numpy().reshape(-1, 1)
+        v = v.cpu().detach().numpy().reshape(-1, 1)
+        x = x.cpu().detach().numpy().reshape(-1, 1)
+        fig = plt.figure()
+        plt.scatter(v*(x**2), dudt)
+       	plt.xlabel('v *	x^2')
+       	plt.ylabel('du/dt')
+        fileWriter.add_figure('dudt ~ v*x^2', fig, epoch)
+        plt.close(fig)
+        reg_u_vx2 = LinearRegression().fit(v*(x**2), dudt)
+        lambda_u_vx2 = reg_u_vx2.coef_[0]
+
+        #dudt ~ v*y^2
+        x,y,t,u,v,u_xx,u_yy,v_xx,v_yy = get_vars(y = 1, v = 1)
+        X = torch.stack([x, y, u, v, u_yy, v_yy, u_xx, v_xx], 1)
+        f = self.forward_hpm(X)
+        dudt = - f[:, 0]
+        dudt = dudt.cpu().detach().numpy().reshape(-1, 1)
+        v = v.cpu().detach().numpy().reshape(-1, 1)
+        y = y.cpu().detach().numpy().reshape(-1, 1)
+        fig = plt.figure()
+        plt.scatter(v*(y**2), dudt)
+        plt.xlabel('v * y^2')
+        plt.ylabel('du/dt')
+        fileWriter.add_figure('dudt ~ v*y^2', fig, epoch)
+        plt.close(fig)
+        reg_u_vy2 = LinearRegression().fit(v*(y**2), dudt)
+        lambda_u_vy2 = reg_u_vy2.coef_[0]
+
+        #f_u = -1 * u_t - 0.5 * v_xx - 0.5 * v_yy + omega* 0.5 * (x ** 2) * v + omega * 0.5 *  (y ** 2) * v
+        #f_v = -1 * v_t + 0.5 * u_xx + 0.5 * u_yy - omega* 0.5 * (x ** 2) * u - omega * 0.5 * (y ** 2) * u
+        x,y,t,u,v,u_xx,u_yy,v_xx,v_yy = get_vars(x=1,y=1,t=1,u=1,v=1,u_xx=1,u_yy=1,v_xx=1,v_yy=1)
+        X = torch.stack([x, y, u, v, u_yy, v_yy, u_xx, v_xx], 1)
+        f = self.forward_hpm(X)
+        dudt = - f[:, 0]
+        dudt = dudt.cpu().detach().numpy().reshape(-1, 1)
+        dvdt = - f[:, 1]
+        dvdt = dvdt.cpu().detach().numpy().reshape(-1, 1)
+
+        x = x.cpu().detach().numpy().reshape(-1, 1)
+        y = y.cpu().detach().numpy().reshape(-1, 1)
+        u = u.cpu().detach().numpy().reshape(-1, 1)
+        v = v.cpu().detach().numpy().reshape(-1, 1)
+        u_yy = u_yy.cpu().detach().numpy().reshape(-1, 1)
+        v_yy = v_yy.cpu().detach().numpy().reshape(-1, 1)
+        u_xx = u_xx.cpu().detach().numpy().reshape(-1, 1)
+        v_xx = v_xx.cpu().detach().numpy().reshape(-1, 1)
+
+        my_dudt = lambda_u_xx*v_xx + lambda_u_yy*v_yy + lambda_u_vx2*v*x**2 + lambda_u_vy2*v*y**2
+        my_dvdt = lambda_v_xx*u_xx + lambda_v_yy*u_yy + lambda_v_ux2*u*x**2 + lambda_v_uy2*u*y**2
+
+        diff_u = np.linalg.norm(dudt - my_dudt,2)
+        diff_v = np.linalg.norm(dvdt - my_dvdt,2)
+
+        return lambda_v_xx,lambda_v_yy, lambda_v_ux2, lambda_v_uy2, lambda_u_xx,lambda_u_yy, lambda_u_vx2, lambda_u_vy2, diff_u, diff_v
 
 
     def hpm_loss(self, x, y, t, Ex_u, Ex_v):
@@ -116,7 +323,7 @@ class SchrodingerHPMNet(SchrodingerNet):
         Ex_u = Ex_u.view(-1)
         Ex_v = Ex_v.view(-1)
 
-        hpmLoss = torch.mean((u - Ex_u) ** 2) + torch.mean((v - Ex_v) ** 2) + torch.mean(f_u ** 2) + torch.mean(f_v ** 2)
+        hpmLoss = torch.mean(f_u ** 2) + torch.mean(f_v ** 2) + torch.mean((u - Ex_u) ** 2) + torch.mean((v - Ex_v) ** 2)  
         return hpmLoss
    
 	    
@@ -135,11 +342,11 @@ if __name__ == "__main__":
     parser.add_argument("--numbatches", dest="numBatches", type=int, default=800)
     parser.add_argument("--numlayers", dest="numLayers", type=int, default=8)
     parser.add_argument("--numfeatures", dest="numFeatures", type=int, default=300)
-    parser.add_argument("--numlayers_hpm", dest="numLayers_hpm", type=int, default=3)
-    parser.add_argument("--numfeatures_hpm", dest="numFeatures_hpm", type=int, default=100)
-    parser.add_argument("--t_ic",dest="t_ic",type=float, default = 1e-6)
+    parser.add_argument("--numlayers_hpm", dest="numLayers_hpm", type=int, default=4)
+    parser.add_argument("--numfeatures_hpm", dest="numFeatures_hpm", type=int, default=300)
+    parser.add_argument("--t_ic",dest="t_ic",type=float, default = 3e-7)
     parser.add_argument("--t_pde",dest="t_pde",type=float, default = 1e-6)
-    parser.add_argument("--pretraining", dest="pretraining", type=int, default=1)
+    parser.add_argument("--pretraining", dest="pretraining", type=int, default=0)
     args = parser.parse_args()
 
     if hvd.rank() == 0: 
@@ -169,11 +376,11 @@ if __name__ == "__main__":
 
     model = SchrodingerHPMNet(args.numLayers, args.numFeatures, args.numLayers_hpm, args.numFeatures_hpm, ds.lb, ds.ub, 5, 5, activation).cuda()
 
-    optimizer = optim.Adam(model.parameters(), lr=1e-6)
+    optimizer = optim.Adam(model.parameters(), lr=1e-7)
     optimizer = hvd.DistributedOptimizer(optimizer,
                                          named_parameters=model.named_parameters(),
                                          backward_passes_per_step=1)
-    # load_checkpoint(model, './results/models/S2D_DeepHPM/1_pde/model_29000.pt')
+    #load_checkpoint(model, './results/models/with_params_4/0_ic/model_76000.pt')
     # broadcast parameters & optimizer state.
     hvd.broadcast_parameters(model.state_dict(), root_rank=0)
     hvd.broadcast_optimizer_state(optimizer, root_rank=0)
@@ -182,10 +389,10 @@ if __name__ == "__main__":
         """
         approximate full simulation
         """
-        epoch = 0
         l_loss = 1
+        epoch = 0
         start_time = time.time()
-        while (l_loss > args.t_ic):   
+        while (l_loss > args.t_ic or epoch < 30000):   
             epoch+=1
             for x, y, t, Ex_u, Ex_v in train_loader:
                 optimizer.zero_grad()
@@ -193,19 +400,19 @@ if __name__ == "__main__":
                 loss = model.loss_ic(x, y, t, Ex_u, Ex_v)
                 loss.backward()
                 optimizer.step()
+            l_loss_0 = l_loss
             l_loss = loss.item()
 
-            if (epoch % 100 == 0) and log_writer:
+
+            if (epoch % 1000 == 0) and log_writer:
+              
                 print("[%d] IC loss: %.4e [%.2fs]" % (epoch, l_loss, time.time() - start_time))
                 log_writer.add_scalar("loss_ic", l_loss, epoch)
+              
                 writeValidationLoss(0, model, epoch, log_writer, coordinateSystem, identifier = "PT")
                 writeIntermediateState(0, model, epoch, log_writer, coordinateSystem, identifier = "PT")
-                writeValidationLoss(250, model, epoch, log_writer, coordinateSystem, identifier = "PT")
-                writeIntermediateState(250, model, epoch, log_writer, coordinateSystem, identifier = "PT")
                 writeValidationLoss(500, model, epoch, log_writer, coordinateSystem, identifier = "PT")
                 writeIntermediateState(500, model, epoch, log_writer, coordinateSystem, identifier = "PT")
-                writeValidationLoss(750, model, epoch, log_writer, coordinateSystem, identifier = "PT")
-                writeIntermediateState(750, model, epoch, log_writer, coordinateSystem, identifier = "PT")
                 writeValidationLoss(1000, model, epoch, log_writer, coordinateSystem, identifier = "PT")
                 writeIntermediateState(1000, model, epoch, log_writer, coordinateSystem, identifier = "PT")
 
@@ -218,11 +425,10 @@ if __name__ == "__main__":
     """
     # we need to significantly reduce the learning rate [default: 9e-6]
     for paramGroup in optimizer.param_groups:
-        paramGroup['lr'] = 1e-6
+        paramGroup['lr'] = 1e-7
 
-    # if learning process has been restarted
     if not args.pretraining:
-        epoch = 16000 
+        epoch = 0
 
     l_loss = 1
     start_time = time.time()
@@ -240,24 +446,38 @@ if __name__ == "__main__":
         
         l_loss = loss.item()
 
-        if (epoch % 100 == 0) and log_writer:
-            writer.add_scalar("hpm_loss", l_loss, epoch)
+        if (epoch % 1000 == 0) and log_writer:
+
+            lambda_v_xx,lambda_v_yy, lambda_v_ux2, lambda_v_uy2, lambda_u_xx,lambda_u_yy, lambda_u_vx2, lambda_u_vy2, diff_u, diff_v = model.get_params(ds, log_writer)
+            log_writer.add_scalar("lambda_v_xx", lambda_v_xx, epoch)
+            log_writer.add_scalar("lambda_v_yy", lambda_v_yy, epoch)
+            log_writer.add_scalar("lambda_v_ux2", lambda_v_ux2, epoch)
+       	    log_writer.add_scalar("lambda_v_uy2", lambda_v_uy2, epoch)
+            log_writer.add_scalar("lambda_u_xx", lambda_u_xx, epoch)
+            log_writer.add_scalar("lambda_u_yy", lambda_u_yy, epoch)
+            log_writer.add_scalar("lambda_u_vx2", lambda_u_vx2, epoch)
+            log_writer.add_scalar("lambda_u_vy2", lambda_u_vy2, epoch)
+            log_writer.add_scalar("diff_u_t", diff_u, epoch)
+            log_writer.add_scalar("diff_v_t", diff_v, epoch)
+            log_writer.add_scalar("hpm_loss", l_loss, epoch)
+ 
+            model.hpm_diff(x, y, t, log_writer)
+
             print("[%d] PDE loss: %.4e [%.2fs] saved" % (epoch, loss.item(), time.time() - start_time))
+
             writeIntermediateState(0, model, epoch, log_writer, coordinateSystem, identifier = "PDE")
-            writeIntermediateState(250, model, epoch, log_writer, coordinateSystem, identifier = "PDE")
             writeIntermediateState(500, model, epoch, log_writer, coordinateSystem, identifier = "PDE")
-            writeIntermediateState(750, model, epoch, log_writer, coordinateSystem, identifier = "PDE")
             writeIntermediateState(1000, model, epoch, log_writer, coordinateSystem, identifier = "PDE")
+
             writeValidationLoss(0, model, epoch, log_writer, coordinateSystem, identifier = "PDE")
-            writeValidationLoss(250, model, epoch, log_writer, coordinateSystem, identifier = "PDE")
             writeValidationLoss(500, model, epoch, log_writer, coordinateSystem, identifier = "PDE")
-            writeValidationLoss(750, model, epoch, log_writer, coordinateSystem, identifier = "PDE")
             writeValidationLoss(1000, model, epoch, log_writer, coordinateSystem, identifier = "PDE")
+
             sys.stdout.flush()
 
             log_writer.add_histogram('First Layer Grads', model.lin_layers_hpm[0].weight.grad.view(-1, 1), epoch)
                 
             save_checkpoint(model, modelPath+"1_pde/", epoch)
-    
     save_checkpoint(model, modelPath+"1_pde/", epoch)
     print("--- converged ---")
+

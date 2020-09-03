@@ -9,7 +9,7 @@ import scipy.io
 from torch.autograd import Variable
 import torch.optim as optim
 from enum import Enum
-from Schrodinger.Dataset.Schrodinger2DDatasets import SchrodingerEquationDataset
+from Schrodinger2DDatasets import SchrodingerEquationDataset
 import matplotlib.pyplot as plt
 import torch.utils.data.distributed
 from tensorboardX import SummaryWriter
@@ -195,6 +195,25 @@ class SchrodingerNet(nn.Module):
 
         return loss
 
+    def loss_uv(self, x, y, t, u0, v0, filewriter=None, epoch = 0, w_ssim = 0):
+        """
+	Returns the quality of the net
+        """
+        x = x.view(-1)
+        y = y.view(-1)
+        t = t.view(-1)
+        inputX = torch.stack([x, y, t], 1)
+        UV = self.forward(inputX)
+        u = UV[:, 0].view(-1,1)
+        v = UV[:, 1].view(-1,1)
+
+        u0 = u0.view(-1,1)
+        v0 = v0.view(-1,1)
+
+        loss_u = (torch.mean((u0 - u) ** 2)) 
+        loss_v = (torch.mean((v0 - v) ** 2))
+
+        return loss_u, loss_v
     
     def loss_pde(self, x0, y0, t0, u0, v0, xf, yf, tf, xe, ye, te, c, samplingX, samplingY,activateEnergyLoss=True, alpha=1.):
         #reshape all inputs into correct shape 
@@ -305,10 +324,12 @@ def valLoss(model, timeStep, csystem):
     uVal = np.array(uVal).reshape(-1)
     vVal = np.array(vVal).reshape(-1)
 
-    valLoss_u = np.max( abs(uVal - uPred)) 
-    valLoss_v = np.max( abs(vVal - vPred))
-    
-    return valLoss_u, valLoss_v
+    valLoss_u = np.max(abs(uVal - uPred)) 
+    valLoss_v = np.max(abs(vVal - vPred))
+    valSqLoss_u = np.sqrt(np.sum(np.power(uVal - uPred,2)))
+    valSqLoss_v	= np.sqrt(np.sum(np.power(vVal - vPred,2)))
+
+    return valLoss_u, valLoss_v, valSqLoss_u, valSqLoss_v
 
 
 def writeValidationLoss(timeStep, model, epoch, writer, csystem, identifier):
@@ -318,16 +339,20 @@ def writeValidationLoss(timeStep, model, epoch, writer, csystem, identifier):
     _, _, t = SchrodingerEquationDataset.getInput(timeStep,csystem)
     t = torch.Tensor(t).float().cuda()
 
-    valLoss_u, valLoss_v = valLoss(model, timeStep,csystem)
+    valLoss_u, valLoss_v, valSqLoss_u, valSqLoss_v = valLoss(model, timeStep,csystem)
     valLoss_uv = valLoss_u + valLoss_v
-    writer.add_scalar("L_%s/u/t%.2f" % (identifier, t[0].cpu().numpy()), valLoss_u, epoch)
-    writer.add_scalar("L_%s/v/t%.2f" % (identifier, t[0].cpu().numpy()), valLoss_v, epoch)
-    writer.add_scalar("L_%s/uv/t%.2f" % (identifier, t[0].cpu().numpy()), valLoss_uv, epoch)
-        
+    valSqLoss_uv = valSqLoss_u + valSqLoss_v
+    writer.add_scalar("inf: L_%s/u/t%.2f" % (identifier, t[0].cpu().numpy()), valLoss_u, epoch)
+    writer.add_scalar("inf: L_%s/v/t%.2f" % (identifier, t[0].cpu().numpy()), valLoss_v, epoch)
+    writer.add_scalar("inf: L_%s/uv/t%.2f" % (identifier, t[0].cpu().numpy()), valLoss_uv, epoch)
+    writer.add_scalar("2nd: L_%s/u/t%.2f" % (identifier, t[0].cpu().numpy()), valSqLoss_u, epoch)
+    writer.add_scalar("2nd: L_%s/v/t%.2f" % (identifier, t[0].cpu().numpy()), valSqLoss_v, epoch)
+    writer.add_scalar("2nd: L_%s/uv/t%.2f" % (identifier, t[0].cpu().numpy()), valSqLoss_uv, epoch)
+    
 
 
 def save_checkpoint(model, path, epoch):
-    print(model.state_dict().keys())    
+    #print(model.state_dict().keys())    
     pathlib.Path(path).mkdir(parents=True, exist_ok=True) 
     state = {
         'model': model.state_dict(),
@@ -360,6 +385,57 @@ def getDefaults():
     coordinateSystem = {"x_lb": xmin, "x_ub": xmax, "y_lb": ymin, "y_ub" : ymax, "nx":nx , "ny":ny, "nt": nt, "dt": dt}
 
     return coordinateSystem, numOfEnergySamplingPointsX, numOfEnergySamplingPointsY, tmax 
+    
+def get_vars(x=0,y=0,t=0,u=0,v=0,u_xx=0,u_yy=0,v_xx=0,v_yy=0):
+
+        if x != 0:
+           x =  np.random.uniform(-3,3,100)
+        else:
+           x = np.zeros(100)
+        if y != 0:
+           y =  np.random.uniform(-3,3,100)
+        else:
+           y = np.zeros(100)
+        if t != 0:
+           t =  0.5*np.ones(100)
+        else:
+           t = np.zeros(100)
+        if u != 0:
+           u =  np.random.uniform(-0.5,0.5,100)
+        else:
+           u = np.zeros(100)
+        if v != 0:
+           v =  np.random.uniform(-0.5,0.5,100)
+        else:
+           v = np.zeros(100)
+        if u_xx !=0:
+           u_xx =  np.random.uniform(-1,1,100)
+        else:
+           u_xx = np.zeros(100)
+        if u_yy !=0:
+           u_yy =  np.random.uniform(-1,1,100)
+        else:
+           u_yy = np.zeros(100)
+        if v_xx !=0:
+           v_xx =  np.random.uniform(-1,1,100)
+        else:
+           v_xx = np.zeros(100)
+        if v_yy !=0:
+           v_yy =  np.random.uniform(-1,1,100)
+        else:
+           v_yy = np.zeros(100)
+        x = torch.Tensor(x)
+        y = torch.Tensor(y)
+        t = torch.Tensor(t)
+        u = torch.Tensor(u)
+        v = torch.Tensor(v)
+        u_yy = torch.Tensor(u_yy)
+        v_yy = torch.Tensor(v_yy)
+        u_xx = torch.Tensor(u_xx)
+        v_xx = torch.Tensor(v_xx)
+
+        return x,y,t,u,v,u_xx,u_yy,v_xx,v_yy
+
 
 if __name__ == "__main__":   
     parser = ArgumentParser()
