@@ -53,11 +53,10 @@ class HeatEquationBaseNet(nn.Module):
         :param self:
         :return:
         """
-        print("layers", self.noLayers)
         self.in_t.append(nn.Linear(3, self.noFeatures)) # time
         for _ in range(self.noLayers):
             self.in_t.append(nn.Linear(self.noFeatures, self.noFeatures))
-        self.in_t.append(nn.Linear(self.noFeatures,2))
+        self.in_t.append(nn.Linear(self.noFeatures,1))
 
         
         for m in self.in_t:
@@ -69,11 +68,9 @@ class HeatEquationBaseNet(nn.Module):
     def forward(self, x):
         # scale spatiotemporral coordinate to [-1,1]
         t_in = (x - self.lb)/(self.ub - self.lb)
-
         # only normalize to [-1,1] in case of tanh
         #if(self.activation == torch.tanh):
         t_in = 2.0 * t_in - 1.0
-
         for i in range(len(self.in_t)-1):
             t_in = self.in_t[i](t_in)
             t_in = self.activation(t_in)
@@ -153,7 +150,6 @@ class HeatEquationBaseNet(nn.Module):
 
     
     def loss_ic(self, x, y, t, u0, filewriter=None, epoch = 0, w_ssim = 0):
-    #def loss_ic(self, x, y, t, u0, v0, filewriter=None, epoch = 0, w_ssim = 0):
         """
         Returns the quality of the net
         """
@@ -161,11 +157,8 @@ class HeatEquationBaseNet(nn.Module):
         y = y.view(-1)
         t = t.view(-1)
         inputX = torch.stack([x, y, t], 1)
-        UV = self.forward(inputX)
-        u = UV[:, 0].view(-1,1)
-        #v = UV[:, 1].view(-1,1)
-
-        u0 = u0.view(-1,1)
+        u = self.forward(inputX).view(-1)
+        u0 = u0.view(-1)
         #v0 = v0.view(-1,1)
 
         #loss = (torch.mean((u0 - u) ** 2) + torch.mean((v0 - v) ** 2))
@@ -173,27 +166,7 @@ class HeatEquationBaseNet(nn.Module):
 
         return loss
 
-    def loss_uv(self, x, y, t, u0, filewriter=None, epoch = 0, w_ssim = 0):
-    #def loss_uv(self, x, y, t, u0, v0, filewriter=None, epoch = 0, w_ssim = 0):
-        """
-	Returns the quality of the net
-        """
-        x = x.view(-1)
-        y = y.view(-1)
-        t = t.view(-1)
-        inputX = torch.stack([x, y, t], 1)
-        UV = self.forward(inputX)
-        u = UV[:, 0].view(-1,1)
-        #v = UV[:, 1].view(-1,1)
 
-        u0 = u0.view(-1,1)
-        #v0 = v0.view(-1,1)
-
-        loss_u = (torch.mean((u0 - u) ** 2)) 
-        #loss_v = (torch.mean((v0 - v) ** 2))
-
-        return loss_u  #, loss_v
-    
     def loss_pde(self, x0, y0, t0, u0, xf, yf, tf, xe, ye, te, c, samplingX, samplingY,activateEnergyLoss=True, alpha=1.):
     #def loss_pde(self, x0, y0, t0, u0, v0, xf, yf, tf, xe, ye, te, c, samplingX, samplingY,activateEnergyLoss=True, alpha=1.):
         #reshape all inputs into correct shape 
@@ -358,8 +331,8 @@ def load_checkpoint(model, path):
 
 def getDefaults():
     # static parameter
-    nx = 200
-    ny = 200
+    nx = 640
+    ny = 480 
     nt = 1000
     xmin = -3
     xmax = 3

@@ -228,21 +228,19 @@ class HeatEquationHPMDataset(SchrodingerEquationDataset):
 
 
         # sclice the array for training
-        self.x = self.x[:self.numSamples]
-        self.y = self.y[:self.numSamples]
-        self.t = self.t[:self.numSamples]
-        self.u = self.u[:self.numSamples]
+        self.x = self.dtype(self.x[:self.numSamples])
+        self.y = self.dtype(self.y[:self.numSamples])
+        self.t = self.dtype(self.t[:self.numSamples])
+        self.u = self.dtype(self.u[:self.numSamples])
         #self.v = self.v[:self.numSamples]
 
 
     def __getitem__(self, index):
         # generate batch for inital solution
-
-        x = self.dtype(self.x[index * self.batchSize: (index + 1) * self.batchSize])
-        y = self.dtype(self.y[index * self.batchSize: (index + 1) * self.batchSize])
-        t = self.dtype(self.t[index * self.batchSize: (index + 1) * self.batchSize])
-        u = self.dtype(self.u[index * self.batchSize: (index + 1) * self.batchSize])
-        #v = self.dtype(self.v[index * self.batchSize: (index + 1) * self.batchSize])
+        x = (self.x[index * self.batchSize: (index + 1) * self.batchSize])
+        y = (self.y[index * self.batchSize: (index + 1) * self.batchSize])
+        t = (self.t[index * self.batchSize: (index + 1) * self.batchSize])
+        u = (self.u[index * self.batchSize: (index + 1) * self.batchSize])
         return x, y, t, u 
 
     def __len__(self):

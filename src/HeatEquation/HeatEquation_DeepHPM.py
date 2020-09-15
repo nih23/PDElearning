@@ -66,7 +66,7 @@ class HeatEquationHPMNet(HeatEquationBaseNet):
         self.lin_layers_hpm.append(nn.Linear(8, self.noFeatures_hpm))
         for _ in range(self.noLayers_hpm):
             self.lin_layers_hpm.append(nn.Linear(self.noFeatures_hpm, self.noFeatures_hpm))
-        self.lin_layers_hpm.append(nn.Linear(self.noFeatures_hpm, 2))
+        self.lin_layers_hpm.append(nn.Linear(self.noFeatures_hpm, 1))
 
         for m in self.lin_layers_hpm:
             if isinstance(m, nn.Linear):
@@ -94,16 +94,10 @@ class HeatEquationHPMNet(HeatEquationBaseNet):
         y = y.view(-1)
 
         X = torch.stack([u_yy, u_xx], 1) #change parameters, Temperature, coordinates 
-        # X = torch.stack([x, y, u, v, u_yy, v_yy, u_xx, v_xx], 1)
 
         f = u_t - self.forward_hpm(X)
-        # f = torch.stack([-1 * u_t, -1 * v_t], 1) - self.forward_hpm(X)
-
-        #f_u = f[:, 0]
-        # f_v = f[:, 1]
 
         return u, f
-        # return u, v, f_u, f_v
 
     def get_params(self, x, y, t): #not necessary
 
@@ -166,13 +160,13 @@ class HeatEquationHPMNet(HeatEquationBaseNet):
 
 def getDefaults():
     # static parameter
-    nx = 200
-    ny = 200
+    nx = 640 
+    ny = 480
     nt = 1000
-    xmin = 0
-    xmax = 640
-    ymin = 0
-    ymax = 480
+    xmin = -1
+    xmax = 1
+    ymin = -1
+    ymax = 1
     dt = 1
     tmax = 1.9271e-04
     #numOfEnergySamplingPointsX = 100
@@ -256,7 +250,7 @@ if __name__ == "__main__":
     model = HeatEquationHPMNet(args.numLayers, args.numFeatures, args.numLayers_hpm, args.numFeatures_hpm, ds.lb, ds.ub,
                               5, 5, activation).cuda()
 
-    optimizer = optim.Adam(model.parameters(), lr=5e-8)
+    optimizer = optim.Adam(model.parameters(), lr=1e-5)
     optimizer = hvd.DistributedOptimizer(optimizer,
                                          named_parameters=model.named_parameters(),
                                          backward_passes_per_step=1)
@@ -300,6 +294,8 @@ if __name__ == "__main__":
 
     if args.pretraining:
         save_checkpoint(model, modelPath + "0_ic/", epoch)
+        
+
     """
     learn non-linear operator N 
     """
