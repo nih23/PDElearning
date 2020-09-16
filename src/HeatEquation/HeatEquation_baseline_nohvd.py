@@ -229,7 +229,7 @@ def writeIntermediateState(timeStep, model, epoch, fileWriter,csystem, identifie
         return 
        
     nx = csystem['nx']
-    ny = csystem['nx']
+    ny = csystem['ny']
 
     x, y, t = SchrodingerEquationDataset.getInput(timeStep,csystem)
     x = torch.Tensor(x).float().cuda()
