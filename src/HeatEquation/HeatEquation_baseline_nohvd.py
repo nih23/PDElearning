@@ -66,10 +66,8 @@ class HeatEquationBaseNet(nn.Module):
 
 
     def forward(self, x):
-        # scale spatiotemporral coordinate to [-1,1]
+        # scale spatiotemporral coordinates to [-1,1]
         t_in = (x - self.lb)/(self.ub - self.lb)
-        # only normalize to [-1,1] in case of tanh
-        #if(self.activation == torch.tanh):
         t_in = 2.0 * t_in - 1.0
         for i in range(len(self.in_t)-1):
             t_in = self.in_t[i](t_in)

@@ -145,7 +145,7 @@ class SchrodingerEquationDataset(Dataset):
 
     
 class HeatEquationHPMDataset(SchrodingerEquationDataset):
-
+    
     @staticmethod   
     def loadFrame(pFile):
 
@@ -158,7 +158,7 @@ class HeatEquationHPMDataset(SchrodingerEquationDataset):
 
         hf.close()
         
-        timing = timing - np.min(timing) # remove offset, we just care about relative time from beginning of acquisition
+        timing = (timing - np.min(timing)) / 1e-5 # convert into seconds + remove offset, we just care about relative time from beginning of acquisition
         
         return value, timing
     

@@ -158,24 +158,6 @@ class HeatEquationHPMNet(HeatEquationBaseNet):
         # hpmLoss = torch.mean(f_u ** 2) + torch.mean(f_v ** 2) + torch.mean((u - Ex_u) ** 2) + torch.mean((v - Ex_v) ** 2)
         return hpmLoss
 
-def getDefaults():
-    # static parameter
-    nx = 640 
-    ny = 480
-    nt = 1000
-    xmin = -1
-    xmax = 1
-    ymin = -1
-    ymax = 1
-    dt = 1
-    tmax = 1.9271e-04
-    #numOfEnergySamplingPointsX = 100
-    #numOfEnergySamplingPointsY = 100
-
-    coordinateSystem = {"x_lb": xmin, "x_ub": xmax, "y_lb": ymin, "y_ub" : ymax, "nx":nx , "ny":ny, "tmax": tmax, "dt": dt}
-
-    return coordinateSystem
-
 
 def loadTimesteps(pFile):
 
@@ -187,9 +169,32 @@ def loadTimesteps(pFile):
 
     hf.close()
     
-    timing = timing - np.min(timing)
+    timing = (timing - np.min(timing)) / 1e-5 # convert into seconds
     
     return timing
+    
+    
+def getDefaults(args):
+    # static parameter
+    nx = 640 
+    ny = 480
+    xmin = -1
+    xmax = 1
+    ymin = -1
+    ymax = 1
+    dt = 1
+    #tmax = 1.9271e-04
+    #numOfEnergySamplingPointsX = 100
+    #numOfEnergySamplingPointsY = 100
+
+    tmax = np.max(loadTimesteps(args.pData)[0:args.maxFrames,0])
+    
+    print("%d frames <-> tmax: %.1f seconds" % (args.maxFrames, tmax))
+    
+    coordinateSystem = {"x_lb": xmin, "x_ub": xmax, "y_lb": ymin, "y_ub" : ymax, "nx":nx , "ny":ny, "dt": dt, "tmax": tmax}
+
+    return coordinateSystem
+
 
 
 if __name__ == "__main__":
@@ -201,17 +206,18 @@ if __name__ == "__main__":
     torch.cuda.set_device(hvd.local_rank())
 
     parser = ArgumentParser()
-    parser.add_argument("--identifier", dest="identifier", type=str, default="S2D_DeepHPM")
+    parser.add_argument("--identifier", dest="identifier", type=str, default="UKD_DeepHPM")
     parser.add_argument("--pData", dest="pData", type=str, default="/home/hoffma83/Code/PDElearning_Szymon/data/UKD/2014_022_rest.mat")  #"/home/h7/szch154b/2014_022_rest.mat")
     parser.add_argument("--batchsize", dest="batchsize", type=int, default=307200)
     parser.add_argument("--numbatches", dest="numBatches", type=int, default=500)
     parser.add_argument("--numlayers", dest="numLayers", type=int, default=8)
-    parser.add_argument("--numfeatures", dest="numFeatures", type=int, default=300)
+    parser.add_argument("--numfeatures", dest="numFeatures", type=int, default=500)
     parser.add_argument("--numlayers_hpm", dest="numLayers_hpm", type=int, default=8)
     parser.add_argument("--numfeatures_hpm", dest="numFeatures_hpm", type=int, default=300)
-    parser.add_argument("--t_ic", dest="t_ic", type=float, default=1e-7)
+    parser.add_argument("--t_ic", dest="t_ic", type=float, default=1e-4)
     parser.add_argument("--t_pde", dest="t_pde", type=float, default=2e-7)
     parser.add_argument("--pretraining", dest="pretraining", type=int, default=1)
+    parser.add_argument("--maxFrames", dest="maxFrames", type=int, default=500)
     args = parser.parse_args()
 
     if hvd.rank() == 0:
@@ -220,15 +226,7 @@ if __name__ == "__main__":
         print("-" * 10 + "-" * len(args.identifier) + "-" * 10)
 
     # set constants for training
-    coordinateSystem = getDefaults()
-    
-    maxTime = np.max(loadTimesteps(args.pData))
-    coordinateSystem["tMax"] = maxTime
-    print("tmax: %.2e" % (maxTime))
-    # fix maximum time based on timestep of our data
-
-
-
+    coordinateSystem = getDefaults(args)
     
     modelPath = 'results/models/' + args.identifier + '/'
     logdir = 'results/experiments/' + args.identifier + '/'
@@ -242,7 +240,7 @@ if __name__ == "__main__":
     log_writer = SummaryWriter(logdir) if hvd.rank() == 0 else None
 
     # create dataset
-    ds = HeatEquationHPMDataset(args.pData, coordinateSystem, args.numBatches, args.batchsize, shuffle=False, useGPU=True)
+    ds = HeatEquationHPMDataset(args.pData, coordinateSystem, args.numBatches, args.batchsize, shuffle=False, useGPU=True, maxFrames = args.maxFrames)
     # Partition dataset among workers using DistributedSampler
     train_sampler = torch.utils.data.distributed.DistributedSampler(ds, num_replicas=hvd.size(), rank=hvd.rank())
     train_loader = torch.utils.data.DataLoader(ds, batch_size=1, sampler=train_sampler)
@@ -283,6 +281,7 @@ if __name__ == "__main__":
                 print("[%d] IC loss: %.4e [%.2fs]" % (epoch, l_loss, time.time() - start_time))
                 log_writer.add_scalar("loss_ic", l_loss, epoch)
 
+                # ValidationLoss needs to be fixed by Szymon.. currently giving wrong numbers.
                 writeValidationLoss(0, model, epoch, log_writer, coordinateSystem, identifier="PT")
                 writeIntermediateState(0, model, epoch, log_writer, coordinateSystem, identifier="PT")
                 writeValidationLoss(500, model, epoch, log_writer, coordinateSystem, identifier="PT")
