@@ -157,9 +157,7 @@ class HeatEquationBaseNet(nn.Module):
         inputX = torch.stack([x, y, t], 1)
         u = self.forward(inputX).view(-1)
         u0 = u0.view(-1)
-        #v0 = v0.view(-1,1)
 
-        #loss = (torch.mean((u0 - u) ** 2) + torch.mean((v0 - v) ** 2))
         loss = (torch.mean((u0 - u)**2))
 
         return loss

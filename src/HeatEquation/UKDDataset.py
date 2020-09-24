@@ -162,7 +162,7 @@ class HeatEquationHPMDataset(SchrodingerEquationDataset):
         
         return value, timing
     
-    def __init__(self, pData, cSystem, numBatches, batchSize, maxFrames = 500, shuffle=True, useGPU=True):
+    def __init__(self, pData, cSystem, batchSize, numBatches = 5000, maxFrames = 500, shuffle=True, useGPU=True, subsampleFactor = 1):
 
         # Load data for t0
         self.lb = np.array([cSystem["x_lb"], cSystem["y_lb"], 0.])
@@ -171,6 +171,8 @@ class HeatEquationHPMDataset(SchrodingerEquationDataset):
         #for step in range(cSystem["nt"]):            
         Exact_u, timing = self.loadFrame(pData) #shape of the dataa: 307.200x 3000
         Exact_u = Exact_u[0:maxFrames,:]
+        Exact_u = Exact_u[0:-1:subsampleFactor,:]
+        print("Eu shape", Exact_u.shape)
         noTimesteps, dxdy = Exact_u.shape
         Exact_u = Exact_u.reshape(noTimesteps, 640, 480)
         
@@ -198,9 +200,11 @@ class HeatEquationHPMDataset(SchrodingerEquationDataset):
         # sometimes we are loading less files than we specified by batchsize + numBatches 
         # => adapt numBatches to real number of batches for avoiding empty batches
         self.batchSize = batchSize
+        print("batchSize: %d" % (self.batchSize)) 
         self.numSamples = min( (numBatches * batchSize, len(self.x) ) ) 
+        print("self.numSamples: %d" % (self.numSamples)) 
         self.numBatches = self.numSamples // self.batchSize
-        
+        print("numBatches: %d" % (self.numBatches)) 
         self.randomState = np.random.RandomState(seed=1234)
         # Domain bounds
 
@@ -232,7 +236,9 @@ class HeatEquationHPMDataset(SchrodingerEquationDataset):
         self.y = self.dtype(self.y[:self.numSamples])
         self.t = self.dtype(self.t[:self.numSamples])
         self.u = self.dtype(self.u[:self.numSamples])
-        #self.v = self.v[:self.numSamples]
+        
+#        print("Normalizing u to -1/1")
+#        self.u = (self.u - torch.mean(self.u))/3
 
 
     def __getitem__(self, index):

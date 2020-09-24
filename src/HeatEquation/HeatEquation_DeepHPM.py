@@ -63,7 +63,7 @@ class HeatEquationHPMNet(HeatEquationBaseNet):
         :return:
         """
 
-        self.lin_layers_hpm.append(nn.Linear(8, self.noFeatures_hpm))
+        self.lin_layers_hpm.append(nn.Linear(5, self.noFeatures_hpm))
         for _ in range(self.noLayers_hpm):
             self.lin_layers_hpm.append(nn.Linear(self.noFeatures_hpm, self.noFeatures_hpm))
         self.lin_layers_hpm.append(nn.Linear(self.noFeatures_hpm, 1))
@@ -72,6 +72,16 @@ class HeatEquationHPMNet(HeatEquationBaseNet):
             if isinstance(m, nn.Linear):
                 nn.init.xavier_normal_(m.weight)
                 nn.init.constant_(m.bias, 0)
+
+    def forward(self, x):
+        # scale spatiotemporral coordinates to [-1,1]
+        t_in = (x - self.lb)/(self.ub - self.lb)
+        t_in = 2.0 * t_in - 1.0
+        for i in range(len(self.in_t)-1):
+            t_in = self.in_t[i](t_in)
+            t_in = self.activation(t_in)
+        out = self.in_t[-1](t_in) 
+        return (3*out) + 26 #inplace de-normalisation to thermal range
 
     def forward_hpm(self, x):
         for i in range(0, len(self.lin_layers_hpm) - 1):
@@ -93,8 +103,7 @@ class HeatEquationHPMNet(HeatEquationBaseNet):
         x = x.view(-1)
         y = y.view(-1)
 
-        X = torch.stack([u_yy, u_xx], 1) #change parameters, Temperature, coordinates 
-
+        X = torch.stack([x,y,u,u_yy,u_xx], 1) #change parameters, Temperature, coordinates 
         f = u_t - self.forward_hpm(X)
 
         return u, f
@@ -110,9 +119,8 @@ class HeatEquationHPMNet(HeatEquationBaseNet):
 
         X = torch.stack([x, y, u, u_yy, u_xx], 1)
         # X = torch.stack([x, y, u, v, u_yy, v_yy, u_xx, v_xx], 1)
-
         f = self.forward_hpm(X)
-        dudt = - f[:, 0]
+        dudt = f[:, 0]
         # dvdt = - f[:, 1]
 
         dudt = dudt.cpu().detach().numpy().reshape(-1, 1)
@@ -154,9 +162,10 @@ class HeatEquationHPMNet(HeatEquationBaseNet):
         Ex_u = Ex_u.view(-1)
         # Ex_v = Ex_v.view(-1)
 
-        hpmLoss = torch.mean(f_u ** 2) + torch.mean((u - Ex_u) ** 2)
+        hpmLoss = torch.mean(f_u ** 2) 
+        interpolLoss = torch.mean((u - Ex_u) ** 2)
         # hpmLoss = torch.mean(f_u ** 2) + torch.mean(f_v ** 2) + torch.mean((u - Ex_u) ** 2) + torch.mean((v - Ex_v) ** 2)
-        return hpmLoss
+        return hpmLoss, interpolLoss
 
 
 def loadTimesteps(pFile):
@@ -208,16 +217,17 @@ if __name__ == "__main__":
     parser = ArgumentParser()
     parser.add_argument("--identifier", dest="identifier", type=str, default="UKD_DeepHPM")
     parser.add_argument("--pData", dest="pData", type=str, default="/home/hoffma83/Code/PDElearning_Szymon/data/UKD/2014_022_rest.mat")  #"/home/h7/szch154b/2014_022_rest.mat")
+    parser.add_argument("--pModel", dest="pModel", type=str, default="")  #"/home/h7/szch154b/2014_022_rest.mat")
     parser.add_argument("--batchsize", dest="batchsize", type=int, default=307200)
-    parser.add_argument("--numbatches", dest="numBatches", type=int, default=500)
     parser.add_argument("--numlayers", dest="numLayers", type=int, default=8)
     parser.add_argument("--numfeatures", dest="numFeatures", type=int, default=500)
     parser.add_argument("--numlayers_hpm", dest="numLayers_hpm", type=int, default=8)
     parser.add_argument("--numfeatures_hpm", dest="numFeatures_hpm", type=int, default=300)
     parser.add_argument("--t_ic", dest="t_ic", type=float, default=1e-4)
-    parser.add_argument("--t_pde", dest="t_pde", type=float, default=2e-7)
+    parser.add_argument("--t_pde", dest="t_pde", type=float, default=1e-7)
     parser.add_argument("--pretraining", dest="pretraining", type=int, default=1)
     parser.add_argument("--maxFrames", dest="maxFrames", type=int, default=500)
+    parser.add_argument("--subsampleFactor", dest="subsampleFactor", type=int, default=1)
     args = parser.parse_args()
 
     if hvd.rank() == 0:
@@ -240,7 +250,7 @@ if __name__ == "__main__":
     log_writer = SummaryWriter(logdir) if hvd.rank() == 0 else None
 
     # create dataset
-    ds = HeatEquationHPMDataset(args.pData, coordinateSystem, args.numBatches, args.batchsize, shuffle=False, useGPU=True, maxFrames = args.maxFrames)
+    ds = HeatEquationHPMDataset(args.pData, coordinateSystem, args.batchsize, shuffle=True, useGPU=True, maxFrames = args.maxFrames, subsampleFactor = args.subsampleFactor)
     # Partition dataset among workers using DistributedSampler
     train_sampler = torch.utils.data.distributed.DistributedSampler(ds, num_replicas=hvd.size(), rank=hvd.rank())
     train_loader = torch.utils.data.DataLoader(ds, batch_size=1, sampler=train_sampler)
@@ -253,16 +263,20 @@ if __name__ == "__main__":
                                          named_parameters=model.named_parameters(),
                                          backward_passes_per_step=1)
     
+    if(args.pModel != ""):
+        load_checkpoint(model, args.pModel)
+    
     # broadcast parameters & optimizer state.
     hvd.broadcast_parameters(model.state_dict(), root_rank=0)
     hvd.broadcast_optimizer_state(optimizer, root_rank=0)
+
+    epoch = 0
 
     if args.pretraining:
         """
         approximate full simulation
         """
         print("Starting pretraining ..")
-        epoch = 0
         l_loss = 1
         l_loss_0 = 10
         start_time = time.time()
@@ -309,45 +323,41 @@ if __name__ == "__main__":
         for x, y, t, Ex_u in train_loader:
             # for x, y, t, Ex_u, Ex_v in train_loader:
             optimizer.zero_grad()
-            loss = model.hpm_loss(x,
+            hpmLoss,interpolLoss = model.hpm_loss(x,
                                   y,
                                   t,
                                   Ex_u)
-            """
-            loss = model.hpm_loss(x,
-                                  y,
-                                  t,
-                                  Ex_u,
-                                  Ex_v)
-            """
+            loss = hpmLoss + interpolLoss
             loss.backward()
             optimizer.step()
 
         l_loss = loss.item()
-
-        if (epoch % 1000 == 0) and log_writer:
-            lambda_u_xx, lambda_u_yy, diff_u = model.get_params(x, y, t)
+        h_loss = hpmLoss.item()
+        i_loss = interpolLoss.item()
+        if (epoch % 100 == 0) and log_writer:
+            #lambda_u_xx, lambda_u_yy, diff_u = model.get_params(x, y, t)
             # lambda_v_xx, lambda_v_yy, lambda_u_xx, lambda_u_yy, diff_u, diff_v = model.get_params(x, y, t)
             # log_writer.add_scalar("lambda_v_xx", lambda_v_xx, epoch)
             # log_writer.add_scalar("lambda_v_yy", lambda_v_yy, epoch)
-            log_writer.add_scalar("lambda_u_xx", lambda_u_xx, epoch)
-            log_writer.add_scalar("diff_u_t", diff_u, epoch)
+            #og_writer.add_scalar("lambda_u_xx", lambda_u_xx, epoch)
+            #log_writer.add_scalar("diff_u_t", diff_u, epoch)
             # log_writer.add_scalar("diff_v_t", diff_v, epoch)
-            log_writer.add_scalar("hpm_loss", l_loss, epoch)
+            log_writer.add_scalar("hpm_loss", h_loss, epoch)
+            log_writer.add_scalar("interpol_loss", i_loss, epoch)
 
-            print("[%d] PDE loss: %.4e [%.2fs] saved" % (epoch, loss.item(), time.time() - start_time))
+            print("[%d] PDE loss: %.4e %.4e [%.2fs] saved" % (epoch, h_loss, i_loss, time.time() - start_time))
 
-            writeIntermediateState(0, model, epoch, log_writer, coordinateSystem, identifier="PDE")
-            writeIntermediateState(500, model, epoch, log_writer, coordinateSystem, identifier="PDE")
-            writeIntermediateState(1000, model, epoch, log_writer, coordinateSystem, identifier="PDE")
+            #writeIntermediateState(0, model, epoch, log_writer, coordinateSystem, identifier="PDE")
+            #writeIntermediateState(500, model, epoch, log_writer, coordinateSystem, identifier="PDE")
+            #writeIntermediateState(1000, model, epoch, log_writer, coordinateSystem, identifier="PDE")
 
-            writeValidationLoss(0, model, epoch, log_writer, coordinateSystem, identifier="PDE")
-            writeValidationLoss(500, model, epoch, log_writer, coordinateSystem, identifier="PDE")
-            writeValidationLoss(1000, model, epoch, log_writer, coordinateSystem, identifier="PDE")
+            #writeValidationLoss(0, model, epoch, log_writer, coordinateSystem, identifier="PDE")
+            #writeValidationLoss(500, model, epoch, log_writer, coordinateSystem, identifier="PDE")
+            #writeValidationLoss(1000, model, epoch, log_writer, coordinateSystem, identifier="PDE")
 
-            sys.stdout.flush()
+            #sys.stdout.flush()
 
-            log_writer.add_histogram('First Layer Grads', model.lin_layers_hpm[0].weight.grad.view(-1, 1), epoch)
+            #log_writer.add_histogram('First Layer Grads', model.lin_layers_hpm[0].weight.grad.view(-1, 1), epoch)
 
             save_checkpoint(model, modelPath + "1_pde/", epoch)
 
