@@ -11,9 +11,9 @@ import torch.optim as optim
 from enum import Enum
 from sklearn.linear_model import LinearRegression
 
-from Schrodinger2DDatasets import SchrodingerHPMEquationDataset
-from Schrodinger2D_baseline_nohvd import SchrodingerNet
-from Schrodinger2D_functions import *
+from Schrodinger.Dataset.Schrodinger2DDatasets import SchrodingerHPMEquationDataset
+from Schrodinger.Schrodinger2D_baseline_nohvd import SchrodingerNet
+from Schrodinger.Schrodinger2D_functions import *
 
 import matplotlib.pyplot as plt
 import torch.utils.data.distributed
@@ -130,7 +130,7 @@ if __name__ == "__main__":
     parser.add_argument("--identifier", dest="identifier",
                         type=str, default="S2D_DeepHPM")
     parser.add_argument("--pData", dest="pData", type=str,
-                        default="/home/mazh408b/qho_analytical_-3_3/")
+                        default="./")
     parser.add_argument("--batchsize", dest="batchsize",
                         type=int, default=10000)
     parser.add_argument("--numbatches", dest="numBatches",
