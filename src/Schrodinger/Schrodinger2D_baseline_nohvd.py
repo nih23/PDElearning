@@ -10,6 +10,7 @@ from torch.autograd import Variable
 import torch.optim as optim
 from enum import Enum
 from Schrodinger2DDatasets import SchrodingerEquationDataset
+from Schrodinger2D_functions import *
 import matplotlib.pyplot as plt
 import torch.utils.data.distributed
 from tensorboardX import SummaryWriter
@@ -18,8 +19,9 @@ import os
 import sys
 import pathlib
 
+
 class SchrodingerNet(nn.Module):
-    def __init__(self, lb, ub, samplingX, samplingY, activation=torch.tanh, noLayers = 8, noFeatures = 100, use_singlenet = True, ssim_windowSize = 9, initLayers = True, useGPU = False):
+    def __init__(self, lb, ub, samplingX, samplingY, activation=torch.tanh, noLayers=8, noFeatures=100, use_singlenet=True, ssim_windowSize=9, initLayers=True, useGPU=False):
         """
         This function creates the components of the Neural Network and saves the datasets
         :param x0: Position x at time zero
@@ -67,12 +69,11 @@ class SchrodingerNet(nn.Module):
         W = W.reshape(-1)
         self.W = torch.Tensor(W).float()
         if(self.useGPU):
-        	self.W = self.W.cuda()
-       
+            self.W = self.W.cuda()
+
         self.in_t = nn.ModuleList([])
         if(initLayers):
             self.init_layers()
-
 
     def init_layers(self):
         """
@@ -81,31 +82,28 @@ class SchrodingerNet(nn.Module):
         :return:
         """
         print("layers", self.noLayers)
-        self.in_t.append(nn.Linear(3, self.noFeatures)) # time
+        self.in_t.append(nn.Linear(3, self.noFeatures))  # time
         for _ in range(self.noLayers):
             self.in_t.append(nn.Linear(self.noFeatures, self.noFeatures))
-        self.in_t.append(nn.Linear(self.noFeatures,2))
+        self.in_t.append(nn.Linear(self.noFeatures, 2))
 
-        
         for m in self.in_t:
             if isinstance(m, nn.Linear):
                 nn.init.xavier_normal_(m.weight)
                 nn.init.constant_(m.bias, 0)
-
 
     def forward(self, x):
         # scale spatiotemporral coordinate to [-1,1]
         t_in = (x - self.lb)/(self.ub - self.lb)
 
         # only normalize to [-1,1] in case of tanh
-        #if(self.activation == torch.tanh):
+        # if(self.activation == torch.tanh):
         t_in = 2.0 * t_in - 1.0
 
         for i in range(len(self.in_t)-1):
             t_in = self.in_t[i](t_in)
             t_in = self.activation(t_in)
         return self.in_t[-1](t_in)
-                
 
     def net_uv(self, x, y, t):
         """
@@ -115,8 +113,8 @@ class SchrodingerNet(nn.Module):
         :return: Approximated solutions and their gradients
         """
 
-        #torch.cuda.empty_cache()
-        dim = x.shape[0] #defines the shape of the gradient
+        # torch.cuda.empty_cache()
+        dim = x.shape[0]  # defines the shape of the gradient
 
         # save input in variabeles is necessary for gradient calculation
         x = Variable(x, requires_grad=True).cuda()
@@ -131,9 +129,11 @@ class SchrodingerNet(nn.Module):
         grads = torch.ones([dim]).cuda()
 
         # huge change to the tensorflow implementation this function returns all neccessary gradients
-        J_U = torch.autograd.grad(u,[x,y,t], create_graph=True, grad_outputs=grads)
-        J_V = torch.autograd.grad(v,[x,y,t], create_graph=True, grad_outputs=grads)
-    
+        J_U = torch.autograd.grad(
+            u, [x, y, t], create_graph=True, grad_outputs=grads)
+        J_V = torch.autograd.grad(
+            v, [x, y, t], create_graph=True, grad_outputs=grads)
+
         u_x = J_U[0].reshape([dim])
         u_y = J_U[1].reshape([dim])
         u_t = J_U[2].reshape([dim])
@@ -142,11 +142,15 @@ class SchrodingerNet(nn.Module):
         v_y = J_V[1].reshape([dim])
         v_t = J_V[2].reshape([dim])
 
-        u_xx = torch.autograd.grad(u_x, x, create_graph=True, grad_outputs=grads)[0]
-        v_xx = torch.autograd.grad(v_x, x, create_graph=True, grad_outputs=grads)[0]
+        u_xx = torch.autograd.grad(
+            u_x, x, create_graph=True, grad_outputs=grads)[0]
+        v_xx = torch.autograd.grad(
+            v_x, x, create_graph=True, grad_outputs=grads)[0]
 
-        u_yy = torch.autograd.grad(u_y, y, create_graph=True, grad_outputs=grads)[0]
-        v_yy = torch.autograd.grad(v_y, y, create_graph=True, grad_outputs=grads)[0]
+        u_yy = torch.autograd.grad(
+            u_y, y, create_graph=True, grad_outputs=grads)[0]
+        v_yy = torch.autograd.grad(
+            v_y, y, create_graph=True, grad_outputs=grads)[0]
 
         u_xx = u_xx.reshape([dim])
         v_xx = v_xx.reshape([dim])
@@ -155,7 +159,6 @@ class SchrodingerNet(nn.Module):
 
         return u, v, u_yy, v_yy, u_xx, v_xx, u_t, v_t
 
-
     def net_pde(self, x, y, t, omega=1.):
         """
         Calculates the quality of the pde estimation
@@ -163,20 +166,21 @@ class SchrodingerNet(nn.Module):
         :param t time t
         :param omega frequency of the harmonic oscillator 
         """
-        #get predicted solution and the gradients 
+        # get predicted solution and the gradients
         u, v, u_yy, v_yy, u_xx, v_xx, u_t, v_t = self.net_uv(x, y, t)
         x = x.view(-1)
         y = y.view(-1)
 
-        #calculate loss for real and imaginary part seperatly 
+        # calculate loss for real and imaginary part seperatly
         # fu is the real part of the schrodinger equation
-        f_u = -1 * u_t - 0.5 * v_xx - 0.5 * v_yy + omega* 0.5 * (x ** 2) * v + omega * 0.5 *  (y ** 2) * v
-        # fv is the imaginary part of the schrodinger equation 
-        f_v = -1 * v_t + 0.5 * u_xx + 0.5 * u_yy - omega* 0.5 * (x ** 2) * u - omega * 0.5 * (y ** 2) * u
+        f_u = -1 * u_t - 0.5 * v_xx - 0.5 * v_yy + omega * \
+            0.5 * (x ** 2) * v + omega * 0.5 * (y ** 2) * v
+        # fv is the imaginary part of the schrodinger equation
+        f_v = -1 * v_t + 0.5 * u_xx + 0.5 * u_yy - omega * \
+            0.5 * (x ** 2) * u - omega * 0.5 * (y ** 2) * u
         return u, v, f_u, f_v
 
-    
-    def loss_ic(self, x, y, t, u0, v0, filewriter=None, epoch = 0, w_ssim = 0):
+    def loss_ic(self, x, y, t, u0, v0, filewriter=None, epoch=0, w_ssim=0):
         """
         Returns the quality of the net
         """
@@ -185,38 +189,38 @@ class SchrodingerNet(nn.Module):
         t = t.view(-1)
         inputX = torch.stack([x, y, t], 1)
         UV = self.forward(inputX)
-        u = UV[:, 0].view(-1,1)
-        v = UV[:, 1].view(-1,1)
+        u = UV[:, 0].view(-1, 1)
+        v = UV[:, 1].view(-1, 1)
 
-        u0 = u0.view(-1,1)
-        v0 = v0.view(-1,1)
+        u0 = u0.view(-1, 1)
+        v0 = v0.view(-1, 1)
 
         loss = (torch.mean((u0 - u) ** 2) + torch.mean((v0 - v) ** 2))
 
         return loss
 
-    def loss_uv(self, x, y, t, u0, v0, filewriter=None, epoch = 0, w_ssim = 0):
+    def loss_uv(self, x, y, t, u0, v0, filewriter=None, epoch=0, w_ssim=0):
         """
-	Returns the quality of the net
+        Returns the quality of the net
         """
         x = x.view(-1)
         y = y.view(-1)
         t = t.view(-1)
         inputX = torch.stack([x, y, t], 1)
         UV = self.forward(inputX)
-        u = UV[:, 0].view(-1,1)
-        v = UV[:, 1].view(-1,1)
+        u = UV[:, 0].view(-1, 1)
+        v = UV[:, 1].view(-1, 1)
 
-        u0 = u0.view(-1,1)
-        v0 = v0.view(-1,1)
+        u0 = u0.view(-1, 1)
+        v0 = v0.view(-1, 1)
 
-        loss_u = (torch.mean((u0 - u) ** 2)) 
+        loss_u = (torch.mean((u0 - u) ** 2))
         loss_v = (torch.mean((v0 - v) ** 2))
 
         return loss_u, loss_v
-    
-    def loss_pde(self, x0, y0, t0, u0, v0, xf, yf, tf, xe, ye, te, c, samplingX, samplingY,activateEnergyLoss=True, alpha=1.):
-        #reshape all inputs into correct shape 
+
+    def loss_pde(self, x0, y0, t0, u0, v0, xf, yf, tf, xe, ye, te, c, samplingX, samplingY, activateEnergyLoss=True, alpha=1.):
+        # reshape all inputs into correct shape
         x0 = x0.view(-1)
         y0 = y0.view(-1)
         t0 = t0.view(-1)
@@ -238,9 +242,9 @@ class SchrodingerNet(nn.Module):
         solV = v[:n0]
 
         pdeLoss = alpha * torch.mean((solU - u0) ** 2) + \
-                  alpha * torch.mean((solV - v0) ** 2) + \
-                  torch.mean(f_u ** 2) + \
-                  torch.mean(f_v ** 2)
+            alpha * torch.mean((solV - v0) ** 2) + \
+            torch.mean(f_u ** 2) + \
+            torch.mean(f_v ** 2)
 
         if activateEnergyLoss:
             eU = u[n0 + nf:]
@@ -262,201 +266,37 @@ class SchrodingerNet(nn.Module):
             # calculte integral over field for energy conservation
             eLoss = (integral - c) ** 2
             pdeLoss = pdeLoss + eLoss
-            
+
         return pdeLoss
 
 
-def writeIntermediateState(timeStep, model, epoch, fileWriter,csystem, identifier = "PDE"):
-    """
-    Functions that write intermediate solutions to tensorboard
-    """
-    if fileWriter is None:
-        return 
-       
-    nx = csystem['nx']
-    ny = csystem['nx']
-
-    x, y, t = SchrodingerEquationDataset.getInput(timeStep,csystem)
-    x = torch.Tensor(x).float().cuda()
-    y = torch.Tensor(y).float().cuda()
-    t = torch.Tensor(t).float().cuda()
-
-    inputX = torch.stack([x, y, t], 1)
-    UV = model.forward(inputX).detach().cpu().numpy()
-
-    u = UV[:, 0].reshape((nx,ny))
-    v = UV[:, 1].reshape((nx,ny))
-
-    h = u ** 2 + v ** 2
-
-    fig = plt.figure()
-    plt.imshow(u, cmap='jet')
-    plt.colorbar()
-    fileWriter.add_figure('%s-real/t%.2f' % (identifier, t[0].cpu().numpy()), fig, epoch)
-    plt.close(fig)
-
-    fig = plt.figure()
-    plt.imshow(v, cmap='jet')
-    plt.colorbar()
-    fileWriter.add_figure('%s-imag/t%.2f' % (identifier, t[0].cpu().numpy()), fig, epoch)
-    plt.close(fig)
-
-    fig = plt.figure()
-    plt.imshow(h, cmap='jet')
-    plt.colorbar()
-    fileWriter.add_figure('%s-norm/t%.2f' % (identifier, t[0].cpu().numpy()), fig, epoch)
-    plt.close(fig)
-
-
-def valLoss(model, timeStep, csystem):
-    x, y, t = SchrodingerEquationDataset.getInput(timeStep,csystem)
-    x = torch.Tensor(x).float().cuda()
-    y = torch.Tensor(y).float().cuda()
-    t = torch.Tensor(t).float().cuda()
-
-    inputX = torch.stack([x, y, t], 1)
-    UV = model.forward(inputX).detach().cpu().numpy()
-    uPred = UV[:, 0].reshape(-1)
-    vPred = UV[:, 1].reshape(-1)
-
-    # load label data
-    uVal, vVal = SchrodingerEquationDataset.getFrame(timeStep,csystem)
-    uVal = np.array(uVal).reshape(-1)
-    vVal = np.array(vVal).reshape(-1)
-
-    valLoss_u = np.max(abs(uVal - uPred)) 
-    valLoss_v = np.max(abs(vVal - vPred))
-    valSqLoss_u = np.sqrt(np.sum(np.power(uVal - uPred,2)))
-    valSqLoss_v	= np.sqrt(np.sum(np.power(vVal - vPred,2)))
-
-    return valLoss_u, valLoss_v, valSqLoss_u, valSqLoss_v
-
-
-def writeValidationLoss(timeStep, model, epoch, writer, csystem, identifier):
-    if writer is None:
-        return
-        
-    _, _, t = SchrodingerEquationDataset.getInput(timeStep,csystem)
-    t = torch.Tensor(t).float().cuda()
-
-    valLoss_u, valLoss_v, valSqLoss_u, valSqLoss_v = valLoss(model, timeStep,csystem)
-    valLoss_uv = valLoss_u + valLoss_v
-    valSqLoss_uv = valSqLoss_u + valSqLoss_v
-    writer.add_scalar("inf: L_%s/u/t%.2f" % (identifier, t[0].cpu().numpy()), valLoss_u, epoch)
-    writer.add_scalar("inf: L_%s/v/t%.2f" % (identifier, t[0].cpu().numpy()), valLoss_v, epoch)
-    writer.add_scalar("inf: L_%s/uv/t%.2f" % (identifier, t[0].cpu().numpy()), valLoss_uv, epoch)
-    writer.add_scalar("2nd: L_%s/u/t%.2f" % (identifier, t[0].cpu().numpy()), valSqLoss_u, epoch)
-    writer.add_scalar("2nd: L_%s/v/t%.2f" % (identifier, t[0].cpu().numpy()), valSqLoss_v, epoch)
-    writer.add_scalar("2nd: L_%s/uv/t%.2f" % (identifier, t[0].cpu().numpy()), valSqLoss_uv, epoch)
-    
-
-
-def save_checkpoint(model, path, epoch):
-    #print(model.state_dict().keys())    
-    pathlib.Path(path).mkdir(parents=True, exist_ok=True) 
-    state = {
-        'model': model.state_dict(),
-    }
-    torch.save(state, path + 'model_' + str(epoch)+'.pt')
-    print("saving model to ---> %s" % (path + 'model_' + str(epoch)+'.pt'))
-
-    
-def load_checkpoint(model, path):
-    device = torch.device('cpu')
-    checkpoint = torch.load(path, map_location=device)
-    model.load_state_dict(checkpoint['model'])
-
-
-
-def getDefaults():
-    # static parameter
-    nx = 200
-    ny = 200
-    nt = 1000
-    xmin = -3
-    xmax = 3
-    ymin = -3
-    ymax = 3
-    dt = 0.001
-    tmax = 1
-    numOfEnergySamplingPointsX = 100
-    numOfEnergySamplingPointsY = 100
-
-    coordinateSystem = {"x_lb": xmin, "x_ub": xmax, "y_lb": ymin, "y_ub" : ymax, "nx":nx , "ny":ny, "nt": nt, "dt": dt}
-
-    return coordinateSystem, numOfEnergySamplingPointsX, numOfEnergySamplingPointsY, tmax 
-    
-def get_vars(x=0,y=0,t=0,u=0,v=0,u_xx=0,u_yy=0,v_xx=0,v_yy=0):
-
-        if x != 0:
-           x =  np.random.uniform(-3,3,100)
-        else:
-           x = np.zeros(100)
-        if y != 0:
-           y =  np.random.uniform(-3,3,100)
-        else:
-           y = np.zeros(100)
-        if t != 0:
-           t =  0.5*np.ones(100)
-        else:
-           t = np.zeros(100)
-        if u != 0:
-           u =  np.random.uniform(-0.5,0.5,100)
-        else:
-           u = np.zeros(100)
-        if v != 0:
-           v =  np.random.uniform(-0.5,0.5,100)
-        else:
-           v = np.zeros(100)
-        if u_xx !=0:
-           u_xx =  np.random.uniform(-1,1,100)
-        else:
-           u_xx = np.zeros(100)
-        if u_yy !=0:
-           u_yy =  np.random.uniform(-1,1,100)
-        else:
-           u_yy = np.zeros(100)
-        if v_xx !=0:
-           v_xx =  np.random.uniform(-1,1,100)
-        else:
-           v_xx = np.zeros(100)
-        if v_yy !=0:
-           v_yy =  np.random.uniform(-1,1,100)
-        else:
-           v_yy = np.zeros(100)
-        x = torch.Tensor(x)
-        y = torch.Tensor(y)
-        t = torch.Tensor(t)
-        u = torch.Tensor(u)
-        v = torch.Tensor(v)
-        u_yy = torch.Tensor(u_yy)
-        v_yy = torch.Tensor(v_yy)
-        u_xx = torch.Tensor(u_xx)
-        v_xx = torch.Tensor(v_xx)
-
-        return x,y,t,u,v,u_xx,u_yy,v_xx,v_yy
-
-
-if __name__ == "__main__":   
+if __name__ == "__main__":
     parser = ArgumentParser()
-    parser.add_argument("--identifier", dest="identifier", type=str, default="S2D_baseline")
-    parser.add_argument("--batchsize", dest="batchsize", type=int, default=10000)
-    parser.add_argument("--numbatches", dest="numBatches", type=int, default=300)
-    parser.add_argument("--epochsIC", dest="epochsSolution", type=int, default = 2000)
-    parser.add_argument("--epochsPDE", dest="epochsPDE", type=int, default=50000)
+    parser.add_argument("--identifier", dest="identifier",
+                        type=str, default="S2D_baseline")
+    parser.add_argument("--batchsize", dest="batchsize",
+                        type=int, default=10000)
+    parser.add_argument("--numbatches", dest="numBatches",
+                        type=int, default=300)
+    parser.add_argument("--epochsIC", dest="epochsSolution",
+                        type=int, default=2000)
+    parser.add_argument("--epochsPDE", dest="epochsPDE",
+                        type=int, default=50000)
     parser.add_argument("--initsize", dest="initSize", type=int, default=40000)
-    parser.add_argument("--energyloss", dest="energyLoss",type=int, default=1)
-    parser.add_argument("--pretraining", dest="pretraining", type=int, default=1)
-    parser.add_argument("--alpha",dest="alpha",type=float, default=12.)
-    parser.add_argument("--noFeatures",dest="noFeatures",type=int, default=300)
-    parser.add_argument("--noLayers",dest="noLayers",type=int, default=8)
+    parser.add_argument("--energyloss", dest="energyLoss", type=int, default=1)
+    parser.add_argument("--pretraining", dest="pretraining",
+                        type=int, default=1)
+    parser.add_argument("--alpha", dest="alpha", type=float, default=12.)
+    parser.add_argument("--noFeatures", dest="noFeatures",
+                        type=int, default=300)
+    parser.add_argument("--noLayers", dest="noLayers", type=int, default=8)
     parser.add_argument("--pModel", dest="pModel", type=str, default="")
     args = parser.parse_args()
 
-    #grab constants
+    # grab constants
     coordinateSystem, numOfEnergySamplingPointsX, numOfEnergySamplingPointsY, tmax = getDefaults()
-    
-    #adapter of commandline parameters
+
+    # adapter of commandline parameters
     modelPath = 'results/models/' + args.identifier + '/'
     logdir = 'results/logs/' + args.identifier
     batchSizePDE = args.batchsize
@@ -469,18 +309,19 @@ if __name__ == "__main__":
     pretraining = args.pretraining
     activation = torch.tanh
 
-    #create modelpath
-    pathlib.Path(modelPath).mkdir(parents=True, exist_ok=True) 
+    # create modelpath
+    pathlib.Path(modelPath).mkdir(parents=True, exist_ok=True)
     # create logWriter
-    log_writer = SummaryWriter(logdir) 
+    log_writer = SummaryWriter(logdir)
     # create dataset
-    ds = SchrodingerEquationDataset(coordinateSystem, numOfEnergySamplingPointsX, numOfEnergySamplingPointsY, 40000, numBatches, batchSizePDE, useGPU=True)
+    ds = SchrodingerEquationDataset(coordinateSystem, numOfEnergySamplingPointsX,
+                                    numOfEnergySamplingPointsY, 40000, numBatches, batchSizePDE, useGPU=True)
 
     # Partition dataset among workers using DistributedSampler
     train_loader = torch.utils.data.DataLoader(ds, batch_size=1)
 
-
-    model = SchrodingerNet(ds.lb, ds.ub, numOfEnergySamplingPointsX, numOfEnergySamplingPointsY, activation=activation, noFeatures = args.noFeatures, noLayers = args.noLayers).cuda()
+    model = SchrodingerNet(ds.lb, ds.ub, numOfEnergySamplingPointsX, numOfEnergySamplingPointsY,
+                           activation=activation, noFeatures=args.noFeatures, noLayers=args.noLayers).cuda()
 
     optimizer = optim.Adam(model.parameters(), lr=1e-5)
 
@@ -496,13 +337,14 @@ if __name__ == "__main__":
                 loss.backward()
                 optimizer.step()
                 break
-            
-            if ((epoch % 30 == 0)):
-                print("[%d] IC loss: %.4e [%.2fs]" % (epoch, loss.item(), time.time() - start_time))
-                log_writer.add_scalar("L_IC", loss.item(), epoch)
-                writeIntermediateState(0, model, epoch, log_writer,coordinateSystem, identifier = "PT")
-        save_checkpoint(model, modelPath+"1_pretraining/", epoch)
 
+            if ((epoch % 30 == 0)):
+                print("[%d] IC loss: %.4e [%.2fs]" %
+                      (epoch, loss.item(), time.time() - start_time))
+                log_writer.add_scalar("L_IC", loss.item(), epoch)
+                writeIntermediateState(
+                    0, model, epoch, log_writer, coordinateSystem, identifier="PT")
+        save_checkpoint(model, modelPath+"1_pretraining/", epoch)
 
     """
     optimize PINN on whole domain
@@ -510,8 +352,9 @@ if __name__ == "__main__":
     for paramGroup in optimizer.param_groups:
         paramGroup['lr'] = 9e-6
     # create dataset
-    ds = SchrodingerEquationDataset(coordinateSystem, numOfEnergySamplingPointsX, numOfEnergySamplingPointsY, initSize, numBatches, batchSizePDE, useGPU=True)
-    
+    ds = SchrodingerEquationDataset(coordinateSystem, numOfEnergySamplingPointsX,
+                                    numOfEnergySamplingPointsY, initSize, numBatches, batchSizePDE, useGPU=True)
+
     # Partition dataset among workers using DistributedSampler
     train_loader = torch.utils.data.DataLoader(ds, batch_size=1)
 
@@ -520,48 +363,59 @@ if __name__ == "__main__":
         for x0, y0, t0, Ex_u, Ex_v, xf, yf, tf, xe, ye, te in train_loader:
             optimizer.zero_grad()
             loss = model.loss_pde(x0,
-                                     y0,
-                                     t0,
-                                     Ex_u,
-                                     Ex_v,
-                                     xf,
-                                     yf,
-                                     tf,
-                                     xe,
-                                     ye,
-                                     te,
-                                     1.,
-                                     numOfEnergySamplingPointsX,
-                                     numOfEnergySamplingPointsY,
-                                     activateEnergyLoss,
-                                     args.alpha)
+                                  y0,
+                                  t0,
+                                  Ex_u,
+                                  Ex_v,
+                                  xf,
+                                  yf,
+                                  tf,
+                                  xe,
+                                  ye,
+                                  te,
+                                  1.,
+                                  numOfEnergySamplingPointsX,
+                                  numOfEnergySamplingPointsY,
+                                  activateEnergyLoss,
+                                  args.alpha)
             loss.backward()
             optimizer.step()
 
         if ((epoch % 30 == 0)):
-            print("[%d] PDE loss: %.4e [%.2fs]" % (epoch, loss.item(), time.time() - start_time))
+            print("[%d] PDE loss: %.4e [%.2fs]" %
+                  (epoch, loss.item(), time.time() - start_time))
             log_writer.add_scalar("L_PDE", loss.item(), epoch)
-            writeIntermediateState(0, model, epoch, log_writer, coordinateSystem)
-            writeIntermediateState(250, model, epoch, log_writer, coordinateSystem)
-            writeIntermediateState(500, model, epoch, log_writer, coordinateSystem)
-            writeIntermediateState(750, model, epoch, log_writer, coordinateSystem)
-            writeIntermediateState(1000, model, epoch, log_writer, coordinateSystem)
+            writeIntermediateState(
+                0, model, epoch, log_writer, coordinateSystem)
+            writeIntermediateState(
+                250, model, epoch, log_writer, coordinateSystem)
+            writeIntermediateState(
+                500, model, epoch, log_writer, coordinateSystem)
+            writeIntermediateState(
+                750, model, epoch, log_writer, coordinateSystem)
+            writeIntermediateState(
+                1000, model, epoch, log_writer, coordinateSystem)
             # track_coefficient(model,log_writer)
             writeValidationLoss(model, log_writer, 0, epoch, coordinateSystem)
-            writeValidationLoss(model, log_writer, 250, epoch, coordinateSystem)
-            writeValidationLoss(model, log_writer, 500, epoch, coordinateSystem)
-            writeValidationLoss(model, log_writer, 750, epoch, coordinateSystem)
-            writeValidationLoss(model, log_writer, 1000, epoch, coordinateSystem)
-            save_checkpoint(model, modelPath+"3_pde/", epoch + numEpochsSolution)
+            writeValidationLoss(model, log_writer, 250,
+                                epoch, coordinateSystem)
+            writeValidationLoss(model, log_writer, 500,
+                                epoch, coordinateSystem)
+            writeValidationLoss(model, log_writer, 750,
+                                epoch, coordinateSystem)
+            writeValidationLoss(model, log_writer, 1000,
+                                epoch, coordinateSystem)
+            save_checkpoint(model, modelPath+"3_pde/",
+                            epoch + numEpochsSolution)
 
             sys.stdout.flush()
-            
+
     print("--- converged ---")
     if log_writer:
         hParams = {'numLayers': numLayers,
                    'numFeatures': numFeatures,
                    'ResidualPoints': numBatches * batchSizePDE,
-                   'alpha':args.alpha,
+                   'alpha': args.alpha,
                    'args': args}
 
         valLoss0 = valLoss(model, 0, coordinateSystem)
@@ -576,6 +430,6 @@ if __name__ == "__main__":
                   'hparam/valLoss500': valLoss500,
                   'hparam/valLoss500': valLoss750,
                   'hparam/valLoss1000': valLoss1000
-                 }
+                  }
 
         log_writer.add_hparams(hParams, metric)
