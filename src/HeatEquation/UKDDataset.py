@@ -4,6 +4,9 @@ import torch
 import os
 import h5py
 import SchrodingerAnalytical as SchrodingerAnalytical
+from skimage.filters import sobel
+from skimage.segmentation import watershed
+from scipy import ndimage as ndi
 
 
 class SchrodingerEquationDataset(Dataset):
@@ -38,19 +41,25 @@ class SchrodingerEquationDataset(Dataset):
         posY = yGrid.reshape(-1)
         posT = tGrid.reshape(-1)
       
-      
         return posX, posY, posT
 
     @staticmethod
-    def getInput(t, csystem):
+    def getInput(tpoint, csystem, args):
         """
         get the input for a specifiy point t 
         this function returns a list of grid points appended with time t
         """
+        hf = h5py.File(args.pData + str(tpoint) + '.h5', 'r')
+        t = np.array(hf['timing'][0])
+        hf.close()
+        
         posX, posY = SchrodingerEquationDataset.get2DGrid(csystem["nx"],csystem["ny"])
+        
         size = posX.shape[0]
         posT = np.zeros(size) + t
-        posX, posY, posT = SchrodingerEquationDataset.pixelToCoordinate(posX, posY,posT,csystem)
+        
+        posX, posY, _ = SchrodingerEquationDataset.pixelToCoordinate(posX, posY,posT,csystem)
+        
         return posX, posY, posT
     
     @staticmethod
@@ -66,8 +75,8 @@ class SchrodingerEquationDataset(Dataset):
         return disX, disY, disT
         
     @staticmethod
-    def getFrame(t_pixel, csystem, omega = 1):
-        posX, posY, posT = SchrodingerEquationDataset.getInput(t_pixel, csystem)
+    def getFrame(timepoint, csystem, omega = 1):
+        posX, posY, posT = SchrodingerEquationDataset.getInput(timepoint, csystem)
         Exact = SchrodingerAnalytical.Psi(posX, posY, posT, f=omega)
         return Exact.real, Exact.imag
                                   
@@ -146,63 +155,93 @@ class SchrodingerEquationDataset(Dataset):
     
 class HeatEquationHPMDataset(SchrodingerEquationDataset):
     
+    @staticmethod
+    def segmentation(pFile, step, threshold = 31):
+        """
+        Function to partition a snapshot into brain and non-brain parts
+        It returns a mask with ones for brain part and zeros for non-brain part.
+        """
+    
+        hf = h5py.File(pFile + str(step) + '.h5', 'r')
+        value = np.array(hf['seq'][:])
+        hf.close()
+    
+        value = np.array(value).reshape(-1)
+        value = value.reshape((640,480)).T
+        
+        elevation_map = sobel(value)
+        markers = np.zeros_like(value)
+        markers[value > threshold] = 2
+        markers[value <= threshold] = 1
+        segmentation = watershed(elevation_map, markers)
+        segmentation = ndi.binary_fill_holes(segmentation-1)
+        segmentation = np.array(segmentation, dtype = np.int)
+        
+        return segmentation
+    
     @staticmethod   
-    def loadFrame(pFile):
+    def loadFrame(pFile, step):
 
         if not os.path.exists(pFile):
             raise FileNotFoundError('Could not find file' + pFile)
 
-        hf = h5py.File(pFile, 'r')
+        hf = h5py.File(pFile + str(step) + '.h5', 'r')
         value = np.array(hf['seq'][:])
         timing = np.array(hf['timing'][:])
-
         hf.close()
-        
-        timing = (timing - np.min(timing)) / 1e-5 # convert into seconds + remove offset, we just care about relative time from beginning of acquisition
-        
+       
         return value, timing
     
-    def __init__(self, pData, cSystem, batchSize, numBatches = 5000, maxFrames = 500, shuffle=True, useGPU=True, subsampleFactor = 1):
+    def __init__(self, pData, cSystem, batchSize, numBatches, frameStep, shuffle=True, useGPU=True, frames=[]):
 
         # Load data for t0
         self.lb = np.array([cSystem["x_lb"], cSystem["y_lb"], 0.])
         self.ub = np.array([cSystem["x_ub"], cSystem["y_ub"], cSystem["tmax"]])
-
-        #for step in range(cSystem["nt"]):            
-        Exact_u, timing = self.loadFrame(pData) #shape of the dataa: 307.200x 3000
-        Exact_u = Exact_u[0:maxFrames,:]
-        Exact_u = Exact_u[0:-1:subsampleFactor,:]
-        print("Eu shape", Exact_u.shape)
-        noTimesteps, dxdy = Exact_u.shape
-        Exact_u = Exact_u.reshape(noTimesteps, 640, 480)
+        nt = cSystem["nt"]
         
-        x,y,t = SchrodingerEquationDataset.get3DGrid(noTimesteps, 640,480)
+        frameStep = int(frameStep)
+        
+        # equidistant frames are taken if particular frames aren't given
+        if len(frames) == 0:
+            frames = range(0,nt,frameStep)
+            #nframes = np.random.RandomState(seed=1234).permutation(nt)[0:int(nt//frameStep)] 
+            
+        x,y,t = SchrodingerEquationDataset.get3DGrid(nt, 640,480)
         
         self.u = []
         self.x = []
         self.y = []
         self.t = []
-        for ti in range(noTimesteps):
+        
+        # same mask as for t = 0 is created for all time steps
+        seg_matrix = self.segmentation(pData, 0)
+        
+        for step in frames:
+            Exact_u, timing = self.loadFrame(pData, step)
+            #seg_matrix = self.segmentation(pData, step)
+            Exact_u = Exact_u.reshape(640,480)*seg_matrix.T
             for xi in range(640):
                 for yi in range(480):
-                    self.u.append(Exact_u[ti, xi,yi])
-                    self.x.append(xi)
-                    self.y.append(yi)
-                    self.t.append(timing[ti])
-        
+                    if Exact_u[xi,yi] != 0: # exclude non-brain pixels
+                        self.u.append(Exact_u[xi,yi])
+                        self.x.append(xi)
+                        self.y.append(yi)
+                        self.t.append(timing)
+            del Exact_u, timing               
+
         self.u = np.array(self.u).reshape(-1)
         self.x = np.array(self.x).reshape(-1)
         self.y = np.array(self.y).reshape(-1)
         self.t = np.array(self.t).reshape(-1)
         
         self.x,self.y,_ = SchrodingerEquationDataset.pixelToCoordinate(self.x, self.y, self.t, cSystem)
-        
+               
         # sometimes we are loading less files than we specified by batchsize + numBatches 
         # => adapt numBatches to real number of batches for avoiding empty batches
         self.batchSize = batchSize
         print("batchSize: %d" % (self.batchSize)) 
         self.numSamples = min( (numBatches * batchSize, len(self.x) ) ) 
-        print("self.numSamples: %d" % (self.numSamples)) 
+        print("numSamples: %d" % (self.numSamples)) 
         self.numBatches = self.numSamples // self.batchSize
         print("numBatches: %d" % (self.numBatches)) 
         self.randomState = np.random.RandomState(seed=1234)
@@ -214,8 +253,7 @@ class HeatEquationHPMDataset(SchrodingerEquationDataset):
         else:
             self.dtype = torch.FloatTensor
             self.dtype2 = torch.LongTensor
-
-            
+           
         if shuffle:
             # this function shuffles the whole dataset
 
@@ -230,17 +268,12 @@ class HeatEquationHPMDataset(SchrodingerEquationDataset):
             self.u = self.u[randIdx]
             #self.v = self.v[randIdx]
 
-
         # sclice the array for training
         self.x = self.dtype(self.x[:self.numSamples])
         self.y = self.dtype(self.y[:self.numSamples])
         self.t = self.dtype(self.t[:self.numSamples])
         self.u = self.dtype(self.u[:self.numSamples])
         
-#        print("Normalizing u to -1/1")
-#        self.u = (self.u - torch.mean(self.u))/3
-
-
     def __getitem__(self, index):
         # generate batch for inital solution
         x = (self.x[index * self.batchSize: (index + 1) * self.batchSize])

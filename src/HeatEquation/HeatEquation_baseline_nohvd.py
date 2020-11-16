@@ -9,7 +9,7 @@ import scipy.io
 from torch.autograd import Variable
 import torch.optim as optim
 from enum import Enum
-from UKDDataset import SchrodingerEquationDataset
+from UKDDataset_segm_upd import SchrodingerEquationDataset
 import matplotlib.pyplot as plt
 import torch.utils.data.distributed
 from tensorboardX import SummaryWriter
@@ -18,8 +18,151 @@ import os
 import sys
 import pathlib
 
+def model_snapshot(model, args, timeStep, dataset, csystem):
+    """
+    Function returns approximation of the solution for a time step
+    """
+    seg_matrix = dataset.segmentation(args.pData, 0)
+    x,y,t = dataset.getInput(timeStep, csystem, args)
+    x = torch.Tensor(x).float().cuda()
+    y = torch.Tensor(y).float().cuda()
+    t = torch.Tensor(t).float().cuda()        
+    x = x.view(-1)
+    y = y.view(-1)
+    t = t.view(-1)
+
+    X = torch.stack([x, y, t], 1)
+
+    UV = model.forward(X)
+    
+    return (UV.detach().cpu().numpy().reshape(480,640))*seg_matrix
+
+def real_snapshot(args, timeStep, dataset):
+    """
+    Function returns exact data for a time step
+    """
+    seg_matrix = dataset.segmentation(args.pData, 0)
+    return dataset.loadFrame(args.pData, timeStep)[0].reshape(640,480).T*seg_matrix
+
+def temp_comp(model, args, dataset, csystem, nt, frameStep):
+    """
+    Function calculates arrays of average exact temperature as well as predicted one for multiple time steps
+    """
+    temp = [] # exact
+    temp_pr = [] # predicted
+    for i in range(0,nt,int(frameStep)):
+        mT = model_snapshot(model, args, i, dataset, csystem).reshape(-1)
+        rT = real_snapshot(args, i, dataset).reshape(-1)
+        
+        mT = mT[mT != 0]
+        rT = rT[rT != 0]
+        
+        t_pr = np.mean(mT)
+        t = np.mean(rT)
+        
+        temp.append(t)
+        temp_pr.append(t_pr)
+        
+    return temp, temp_pr
+
+def mse(model, args, dataset, csystem):
+    """
+    Function calculates mean square error for exact and predicted temperature
+    """
+    data = np.array([])
+    prediction = np.array([])
+    for i in range(0,3000,25):
+        mT = model_snapshot(model, args, i, dataset, csystem).reshape(-1)
+        rT = real_snapshot(args, i, dataset).reshape(-1)
+
+        mT = mT[mT != 0]
+        rT = rT[rT != 0]
+
+        data = np.append(data,rT)
+        prediction = np.append(prediction,mT)
+
+    mse = np.square(np.subtract(data, prediction)).mean()
+    
+    return mse
+
+
+def valLoss(model, dataset, timeStep, csystem, args):
+    
+    seg_matrix = dataset.segmentation(args.pData, timeStep)
+    
+    x, y, t = dataset.getInput(timeStep, csystem, args)
+    x = torch.Tensor(x).float().cuda()
+    y = torch.Tensor(y).float().cuda()
+    t = torch.Tensor(t).float().cuda()
+
+    inputX = torch.stack([x, y, t], 1)
+    UV = model.forward(inputX).detach().cpu().numpy()
+    uPred = UV[:, 0].reshape(-1)
+    uPred = (uPred.reshape((480,640))*seg_matrix).reshape(-1)
+
+    # load label data
+    uVal,_ = dataset.loadFrame(args.pData, timeStep)
+    uVal = np.array(uVal).reshape(-1)
+    uVal = (uVal.reshape((640,480)).T*seg_matrix).reshape(-1)
+
+    valLoss_u = np.max(abs(uVal - uPred)) 
+    valSqLoss_u = np.sqrt(np.sum(np.power(uVal - uPred,2)))
+
+    return valLoss_u, valSqLoss_u
+    
+def check(model, dataset, csystem, args):
+    """
+    Function returns square and infinity norm values for miltiple frames as well as frames sorted by square norm value
+    Can be used for re-initialization of dataset
+    """
+    norms_sq = []
+    norms_inf = []
+    for i in range(0, args.nt, int(args.frameStep)):
+    #for i in range(args.nt):
+        valLoss_u, valSqLoss_u = valLoss(model, dataset, i,csystem, args)
+        norms_sq.append(valSqLoss_u)
+        norms_inf.append(valLoss_u)
+    
+    nframes = range(args.nt)
+    _norms_sq_, nframes = zip(*sorted(zip(norms_sq, nframes), reverse = True))
+    
+    return norms_sq, norms_inf, nframes
+
+def save_checkpoint(model, path, epoch):
+    #print(model.state_dict().keys())    
+    pathlib.Path(path).mkdir(parents=True, exist_ok=True) 
+    state = {
+        'model': model.state_dict(),
+    }
+    torch.save(state, path + 'model_' + str(epoch)+'.pt')
+    print("saving model to ---> %s" % (path + 'model_' + str(epoch)+'.pt'))
+
+    
+def load_checkpoint(model, path):
+    device = torch.device('cpu')
+    checkpoint = torch.load(path, map_location=device)
+    model.load_state_dict(checkpoint['model'])
+
+def getDefaults():
+    # static parameter
+    nx = 640
+    ny = 480 
+    nt = 1000
+    xmin = -3
+    xmax = 3
+    ymin = -3
+    ymax = 3
+    dt = 0.001
+    tmax = 1
+    numOfEnergySamplingPointsX = 100
+    numOfEnergySamplingPointsY = 100
+
+    coordinateSystem = {"x_lb": xmin, "x_ub": xmax, "y_lb": ymin, "y_ub" : ymax, "nx":nx , "ny":ny, "nt": nt, "dt": dt}
+
+    return coordinateSystem, numOfEnergySamplingPointsX, numOfEnergySamplingPointsY, tmax 
+
 class HeatEquationBaseNet(nn.Module):
-    def __init__(self, lb, ub, samplingX, samplingY, activation=torch.tanh, noLayers = 8, noFeatures = 100, use_singlenet = True, ssim_windowSize = 9, initLayers = True, useGPU = False):
+    def __init__(self, lb, ub, samplingX, samplingY, activation=torch.tanh, noLayers = 8, noFeatures = 100, use_singlenet = True, ssim_windowSize = 9, initLayers = True, useGPU = True):
         """
         This function creates the components of the Neural Network and saves the datasets
         :param x0: Position x at time zero
@@ -37,15 +180,11 @@ class HeatEquationBaseNet(nn.Module):
         self.useGPU = useGPU
         self.lb = torch.Tensor(lb).float()
         self.ub = torch.Tensor(ub).float()
-        if(self.useGPU):
-            self.lb = self.lb.cuda()
-            self.ub = self.ub.cuda()
         self.noFeatures = noFeatures
         self.noLayers = noLayers
         self.in_t = nn.ModuleList([])
         if(initLayers):
             self.init_layers()
-
 
     def init_layers(self):
         """
@@ -63,7 +202,6 @@ class HeatEquationBaseNet(nn.Module):
             if isinstance(m, nn.Linear):
                 nn.init.xavier_normal_(m.weight)
                 nn.init.constant_(m.bias, 0)
-
 
     def forward(self, x):
         # scale spatiotemporral coordinates to [-1,1]
@@ -99,53 +237,19 @@ class HeatEquationBaseNet(nn.Module):
 
         # huge change to the tensorflow implementation this function returns all neccessary gradients
         J_U = torch.autograd.grad(u,[x,y,t], create_graph=True, grad_outputs=grads)
-        #J_V = torch.autograd.grad(v,[x,y,t], create_graph=True, grad_outputs=grads)
     
         u_x = J_U[0].reshape([dim])
         u_y = J_U[1].reshape([dim])
         u_t = J_U[2].reshape([dim])
 
-        #v_x = J_V[0].reshape([dim])
-        #v_y = J_V[1].reshape([dim])
-        #v_t = J_V[2].reshape([dim])
-
         u_xx = torch.autograd.grad(u_x, x, create_graph=True, grad_outputs=grads)[0]
-        #v_xx = torch.autograd.grad(v_x, x, create_graph=True, grad_outputs=grads)[0]
 
         u_yy = torch.autograd.grad(u_y, y, create_graph=True, grad_outputs=grads)[0]
-        #v_yy = torch.autograd.grad(v_y, y, create_graph=True, grad_outputs=grads)[0]
 
         u_xx = u_xx.reshape([dim])
-        #v_xx = v_xx.reshape([dim])
         u_yy = u_yy.reshape([dim])
-        #v_yy = v_yy.reshape([dim])
 
-        return u, u_yy, u_xx, u_t
-        #return u, v, u_yy, v_yy, u_xx, v_xx, u_t, v_t
-
-
-    def net_pde(self, x, y, t, omega=1.):
-        """
-        Calculates the quality of the pde estimation
-        :param x postion x
-        :param t time t
-        :param omega frequency of the harmonic oscillator 
-        """
-        #get predicted solution and the gradients 
-        u, u_yy, u_xx, u_t = self.net_uv(x, y, t)
-        #u, v, u_yy, v_yy, u_xx, v_xx, u_t, v_t = self.net_uv(x, y, t)
-        x = x.view(-1)
-        y = y.view(-1)
-
-        #calculate loss for real and imaginary part seperatly 
-        # fu is the real part of the schrodinger equation
-        #f_u = -1 * u_t   + omega * 0.5 *  (y ** 2) 
-        f_u = -1 * u_t - 0.5 * v_xx - 0.5 * v_yy + omega* 0.5 * (x ** 2) * v + omega * 0.5 *  (y ** 2) * v
-        # fv is the imaginary part of the schrodinger equation 
-        #f_v =  0.5 * u_xx + 0.5 * u_yy - omega* 0.5 * (x ** 2) * u - omega * 0.5 * (y ** 2) * u
-        f_v = -1 * v_t + 0.5 * u_xx + 0.5 * u_yy - omega* 0.5 * (x ** 2) * u - omega * 0.5 * (y ** 2) * u
-        return u, v, f_u #, f_v
-
+        return u, u_x, u_y, u_xx, u_yy, u_t
     
     def loss_ic(self, x, y, t, u0, filewriter=None, epoch = 0, w_ssim = 0):
         """
@@ -161,184 +265,3 @@ class HeatEquationBaseNet(nn.Module):
         loss = (torch.mean((u0 - u)**2))
 
         return loss
-
-
-    def loss_pde(self, x0, y0, t0, u0, xf, yf, tf, xe, ye, te, c, samplingX, samplingY,activateEnergyLoss=True, alpha=1.):
-    #def loss_pde(self, x0, y0, t0, u0, v0, xf, yf, tf, xe, ye, te, c, samplingX, samplingY,activateEnergyLoss=True, alpha=1.):
-        #reshape all inputs into correct shape 
-        x0 = x0.view(-1)
-        y0 = y0.view(-1)
-        t0 = t0.view(-1)
-        xf = xf.view(-1)
-        yf = yf.view(-1)
-        tf = tf.view(-1)
-        xe = xe.view(-1)
-        ye = ye.view(-1)
-        te = te.view(-1)
-        n0 = x0.shape[0]
-        nf = xf.shape[0]
-        inputX = torch.cat([x0, xf, xe])
-        inputY = torch.cat([y0, yf, ye])
-        inputT = torch.cat([t0, tf, te])
-
-        u, f_u = self.net_pde(inputX, inputY, inputT)
-        #u, v, f_u, f_v = self.net_pde(inputX, inputY, inputT)
-
-        solU = u[:n0]
-        #solV = v[:n0]
-
-        pdeLoss = alpha * torch.mean((solU - u0) ** 2) + \
-                  torch.mean(f_u ** 2) #+ \
-                  #alpha * torch.mean((solV - v0) ** 2) + \
-                  
-                  #torch.mean(f_v ** 2)
-
-        if activateEnergyLoss:
-            eU = u[n0 + nf:]
-            #eV = v[n0 + nf:]
-            eH = eU ** 2 #+ eV ** 2
-
-            lowerX = self.lb[0]
-            higherX = self.ub[0]
-
-            lowerY = self.lb[1]
-            higherY = self.ub[1]
-
-            disX = (higherX - lowerX) / samplingX
-            disY = (higherY - lowerY) / samplingY
-
-            u0 = u0.view(-1)
-            #v0 = v0.view(-1)
-            integral = 0.25 * disX * disY * torch.sum(eH * self.W) #weights???
-            # calculte integral over field for energy conservation
-            eLoss = (integral - c) ** 2
-            pdeLoss = pdeLoss + eLoss
-            
-        return pdeLoss
-
-
-def writeIntermediateState(timeStep, model, epoch, fileWriter,csystem, identifier = "PDE"):
-    """
-    Functions that write intermediate solutions to tensorboard
-    """
-    if fileWriter is None:
-        return 
-       
-    nx = csystem['nx']
-    ny = csystem['ny']
-
-    x, y, t = SchrodingerEquationDataset.getInput(timeStep,csystem)
-    x = torch.Tensor(x).float().cuda()
-    y = torch.Tensor(y).float().cuda()
-    t = torch.Tensor(t).float().cuda()
-
-    inputX = torch.stack([x, y, t], 1)
-    UV = model.forward(inputX).detach().cpu().numpy()
-
-    u = UV[:, 0].reshape((nx,ny))
-    
-    
-    #v = UV[:, 1].reshape((nx,ny))
-
-    #h = u ** 2 + v ** 2
-
-    fig = plt.figure()
-    plt.imshow(u, cmap='jet')
-    plt.colorbar()
-    fileWriter.add_figure('%s-real/t%.2f' % (identifier, t[0].cpu().numpy()), fig, epoch)
-    plt.close(fig)
-
-#    fig = plt.figure()
-#    plt.imshow(v, cmap='jet')
-#    plt.colorbar()
-#    fileWriter.add_figure('%s-imag/t%.2f' % (identifier, t[0].cpu().numpy()), fig, epoch)
-#    plt.close(fig)
-
-#    fig = plt.figure()
-#    plt.imshow(h, cmap='jet')
-#    plt.colorbar()
-#    fileWriter.add_figure('%s-norm/t%.2f' % (identifier, t[0].cpu().numpy()), fig, epoch)
-#    plt.close(fig)
-    
-    
-
-
-def valLoss(model, timeStep, csystem):
-    x, y, t = SchrodingerEquationDataset.getInput(timeStep,csystem)
-    x = torch.Tensor(x).float().cuda()
-    y = torch.Tensor(y).float().cuda()
-    t = torch.Tensor(t).float().cuda()
-
-    inputX = torch.stack([x, y, t], 1)
-    UV = model.forward(inputX).detach().cpu().numpy()
-    uPred = UV[:, 0].reshape(-1)
-    #vPred = UV[:, 1].reshape(-1)
-
-    # load label data
-    uVal, vVal = SchrodingerEquationDataset.getFrame(timeStep,csystem)
-    uVal = np.array(uVal).reshape(-1)
-    #vVal = np.array(vVal).reshape(-1)
-
-    valLoss_u = np.max(abs(uVal - uPred)) 
-    #valLoss_v = np.max(abs(vVal - vPred))
-    valSqLoss_u = np.sqrt(np.sum(np.power(uVal - uPred,2)))
-    #valSqLoss_v	= np.sqrt(np.sum(np.power(vVal - vPred,2)))
-
-    return valLoss_u, valSqLoss_u
-    #return valLoss_u, valLoss_v, valSqLoss_u, valSqLoss_v
-
-
-def writeValidationLoss(timeStep, model, epoch, writer, csystem, identifier):
-    if writer is None:
-        return
-        
-    _, _, t = SchrodingerEquationDataset.getInput(timeStep,csystem)
-    t = torch.Tensor(t).float().cuda()
-
-    valLoss_u, valSqLoss_u = valLoss(model, timeStep,csystem)
-    #valLoss_u, valLoss_v, valSqLoss_u, valSqLoss_v = valLoss(model, timeStep,csystem)
-    #valLoss_uv = valLoss_u + valLoss_v
-    #valSqLoss_uv = valSqLoss_u + valSqLoss_v
-    writer.add_scalar("inf: L_%s/u/t%.2f" % (identifier, t[0].cpu().numpy()), valLoss_u, epoch)
-    #writer.add_scalar("inf: L_%s/v/t%.2f" % (identifier, t[0].cpu().numpy()), valLoss_v, epoch)
-    #writer.add_scalar("inf: L_%s/uv/t%.2f" % (identifier, t[0].cpu().numpy()), valLoss_uv, epoch)
-    writer.add_scalar("2nd: L_%s/u/t%.2f" % (identifier, t[0].cpu().numpy()), valSqLoss_u, epoch)
-    #writer.add_scalar("2nd: L_%s/v/t%.2f" % (identifier, t[0].cpu().numpy()), valSqLoss_v, epoch)
-    #writer.add_scalar("2nd: L_%s/uv/t%.2f" % (identifier, t[0].cpu().numpy()), valSqLoss_uv, epoch)
-    
-
-
-def save_checkpoint(model, path, epoch):
-    #print(model.state_dict().keys())    
-    pathlib.Path(path).mkdir(parents=True, exist_ok=True) 
-    state = {
-        'model': model.state_dict(),
-    }
-    torch.save(state, path + 'model_' + str(epoch)+'.pt')
-    print("saving model to ---> %s" % (path + 'model_' + str(epoch)+'.pt'))
-
-    
-def load_checkpoint(model, path):
-    device = torch.device('cpu')
-    checkpoint = torch.load(path, map_location=device)
-    model.load_state_dict(checkpoint['model'])
-
-
-
-def getDefaults():
-    # static parameter
-    nx = 640
-    ny = 480 
-    nt = 1000
-    xmin = -3
-    xmax = 3
-    ymin = -3
-    ymax = 3
-    dt = 0.001
-    tmax = 1
-    numOfEnergySamplingPointsX = 100
-    numOfEnergySamplingPointsY = 100
-
-    coordinateSystem = {"x_lb": xmin, "x_ub": xmax, "y_lb": ymin, "y_ub" : ymax, "nx":nx , "ny":ny, "nt": nt, "dt": dt}
-
-    return coordinateSystem, numOfEnergySamplingPointsX, numOfEnergySamplingPointsY, tmax 

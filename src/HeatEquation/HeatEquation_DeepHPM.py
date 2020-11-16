@@ -6,26 +6,22 @@ import torch.autograd
 import h5py
 import torch.optim as optim
 import scipy.io
-from torch.autograd import Variable
-import torch.optim as optim
-from enum import Enum
-from sklearn.linear_model import LinearRegression
-
-from UKDDataset import HeatEquationHPMDataset
-from HeatEquation_baseline_nohvd import  writeIntermediateState, valLoss, save_checkpoint, load_checkpoint, writeValidationLoss, HeatEquationBaseNet
-
+import wandb
 import matplotlib.pyplot as plt
 import torch.utils.data.distributed
 import horovod.torch as hvd
-from tensorboardX import SummaryWriter
-from argparse import ArgumentParser
 import os
 import sys
 import pathlib
 import torch.nn.functional as F
 
-import os
-import h5py
+from argparse import ArgumentParser
+from torch.autograd import Variable
+from enum import Enum
+from sklearn.linear_model import LinearRegression
+from UKDDataset_segm_upd import HeatEquationHPMDataset
+from HeatEquation_baseline_nohvd_segm_upd import  valLoss, save_checkpoint, load_checkpoint, HeatEquationBaseNet, check, model_snapshot, real_snapshot, temp_comp, mse
+
 
 class HeatEquationHPMNet(HeatEquationBaseNet):
     def __init__(self, numLayers, numFeatures, numLayers_hpm, numFeatures_hpm, lb, ub, samplingX, samplingY,
@@ -63,7 +59,7 @@ class HeatEquationHPMNet(HeatEquationBaseNet):
         :return:
         """
 
-        self.lin_layers_hpm.append(nn.Linear(5, self.noFeatures_hpm))
+        self.lin_layers_hpm.append(nn.Linear(7, self.noFeatures_hpm))
         for _ in range(self.noLayers_hpm):
             self.lin_layers_hpm.append(nn.Linear(self.noFeatures_hpm, self.noFeatures_hpm))
         self.lin_layers_hpm.append(nn.Linear(self.noFeatures_hpm, 1))
@@ -72,17 +68,7 @@ class HeatEquationHPMNet(HeatEquationBaseNet):
             if isinstance(m, nn.Linear):
                 nn.init.xavier_normal_(m.weight)
                 nn.init.constant_(m.bias, 0)
-
-    def forward(self, x):
-        # scale spatiotemporral coordinates to [-1,1]
-        t_in = (x - self.lb)/(self.ub - self.lb)
-        t_in = 2.0 * t_in - 1.0
-        for i in range(len(self.in_t)-1):
-            t_in = self.in_t[i](t_in)
-            t_in = self.activation(t_in)
-        out = self.in_t[-1](t_in) 
-        return (3*out) + 26 #inplace de-normalisation to thermal range
-
+    
     def forward_hpm(self, x):
         for i in range(0, len(self.lin_layers_hpm) - 1):
             x = self.lin_layers_hpm[i](x)
@@ -98,56 +84,18 @@ class HeatEquationHPMNet(HeatEquationBaseNet):
         :param y postion y
         :param t time t
         """
-        u, u_yy, u_xx, u_t = self.net_uv(x, y, t) #netuv for derivatives
+        u, u_x, u_y, u_xx, u_yy, u_t = self.net_uv(x, y, t) # netuv for derivatives
 
         x = x.view(-1)
         y = y.view(-1)
 
-        X = torch.stack([x,y,u,u_yy,u_xx], 1) #change parameters, Temperature, coordinates 
+        X = torch.stack([x,y,u,u_x,u_y,u_xx,u_yy], 1) # input variables
         f = u_t - self.forward_hpm(X)
 
         return u, f
 
-    def get_params(self, x, y, t): #not necessary
-
-        x = x.view(-1)
-        y = y.view(-1)
-        t = t.view(-1)
-
-        u, u_yy, u_xx, u_t = self.net_uv(x, y, t)
-        # u, v, u_yy, v_yy, u_xx, v_xx, u_t, v_t = self.net_uv(x, y, t)
-
-        X = torch.stack([x, y, u, u_yy, u_xx], 1)
-        # X = torch.stack([x, y, u, v, u_yy, v_yy, u_xx, v_xx], 1)
-        f = self.forward_hpm(X)
-        dudt = f[:, 0]
-        # dvdt = - f[:, 1]
-
-        dudt = dudt.cpu().detach().numpy().reshape(-1, 1)
-        # dvdt = dvdt.cpu().detach().numpy().reshape(-1, 1)
-        # v_xx = v_xx.cpu().detach().numpy().reshape(-1, 1)
-        # v_yy = v_yy.cpu().detach().numpy().reshape(-1, 1)
-        u_xx = u_xx.cpu().detach().numpy().reshape(-1, 1)
-        u_yy = u_yy.cpu().detach().numpy().reshape(-1, 1)
-        u_t = u_t.cpu().detach().numpy().reshape(-1, 1)
-        # v_t = v_t.cpu().detach().numpy().reshape(-1, 1)
-
-        diff_u = np.linalg.norm(dudt - u_t, 2)
-        # diff_v = np.linalg.norm(dvdt-v_t,2)
-
-        reg_u = LinearRegression().fit([[u_xx[i][0], u_yy[i][0]] for i in range(len(u_xx))], dudt)  # ??
-        # reg_u = LinearRegression().fit([[v_xx[i][0],v_yy[i][0]] for i in range(len(v_xx))], dudt)
-        # reg_v = LinearRegression().fit([[u_xx[i][0],u_yy[i][0]] for i in range(len(u_xx))], dvdt)
-
-        lambda_u_xx, lambda_u_yy = reg_u.coef_[0]
-        # lambda_v_xx, lambda_v_yy = reg_u.coef_[0]
-        # lambda_u_xx, lambda_u_yy = reg_v.coef_[0]
-
-        return lambda_u_xx, lambda_u_yy, diff_u
-        # return lambda_v_xx, lambda_v_yy, lambda_u_xx, lambda_u_yy, diff_u, diff_v
-
     def hpm_loss(self, x, y, t, Ex_u):
-        # def hpm_loss(self, x, y, t, Ex_u, Ex_v):
+
         """
         Returns the quality HPM net
         """
@@ -158,32 +106,18 @@ class HeatEquationHPMNet(HeatEquationBaseNet):
 
         u, f_u = self.net_pde(x, y, t)
 
-
         Ex_u = Ex_u.view(-1)
-        # Ex_v = Ex_v.view(-1)
 
         hpmLoss = torch.mean(f_u ** 2) 
         interpolLoss = torch.mean((u - Ex_u) ** 2)
-        # hpmLoss = torch.mean(f_u ** 2) + torch.mean(f_v ** 2) + torch.mean((u - Ex_u) ** 2) + torch.mean((v - Ex_v) ** 2)
+
         return hpmLoss, interpolLoss
-
-
-def loadTimesteps(pFile):
-
-    if not os.path.exists(pFile):
-        raise FileNotFoundError('Could not find file' + pFile)
-
-    hf = h5py.File(pFile, 'r')
-    timing = np.array(hf['timing'][:])
-
-    hf.close()
-    
-    timing = (timing - np.min(timing)) / 1e-5 # convert into seconds
-    
-    return timing
-    
-    
+        
 def getDefaults(args):
+    
+    if not os.path.exists(args.pData):
+        raise FileNotFoundError('Could not find file' + args.pData)
+        
     # static parameter
     nx = 640 
     ny = 480
@@ -192,18 +126,17 @@ def getDefaults(args):
     ymin = -1
     ymax = 1
     dt = 1
-    #tmax = 1.9271e-04
-    #numOfEnergySamplingPointsX = 100
-    #numOfEnergySamplingPointsY = 100
-
-    tmax = np.max(loadTimesteps(args.pData)[0:args.maxFrames,0])
     
-    print("%d frames <-> tmax: %.1f seconds" % (args.maxFrames, tmax))
+    # tmax is afterwards used to normalize time range
+    hf = h5py.File(args.pData + str(args.nt-1) + '.h5', 'r')
+    tmax = np.array(hf['timing'][0])
+    hf.close()
     
-    coordinateSystem = {"x_lb": xmin, "x_ub": xmax, "y_lb": ymin, "y_ub" : ymax, "nx":nx , "ny":ny, "dt": dt, "tmax": tmax}
+    print("%d time steps <-> tmax: %.1f seconds" % (args.nt, tmax))
+    
+    coordinateSystem = {"x_lb": xmin, "x_ub": xmax, "y_lb": ymin, "y_ub" : ymax, "nx":nx , "ny":ny, "dt": dt, "tmax": tmax, "nt": args.nt, "tmax": tmax}
 
     return coordinateSystem
-
 
 
 if __name__ == "__main__":
@@ -216,21 +149,24 @@ if __name__ == "__main__":
 
     parser = ArgumentParser()
     parser.add_argument("--identifier", dest="identifier", type=str, default="UKD_DeepHPM")
-    parser.add_argument("--pData", dest="pData", type=str, default="/home/hoffma83/Code/PDElearning_Szymon/data/UKD/2014_022_rest.mat")  #"/home/h7/szch154b/2014_022_rest.mat")
+    parser.add_argument("--pData", dest="pData", type=str, default="../data/")  #"/home/h7/szch154b/2014_022_rest.mat")
     parser.add_argument("--pModel", dest="pModel", type=str, default="")  #"/home/h7/szch154b/2014_022_rest.mat")
-    parser.add_argument("--batchsize", dest="batchsize", type=int, default=307200)
+    parser.add_argument("--numBatches", dest = "numBatches", type = int, default = 200000)
+    parser.add_argument("--batchSize", dest="batchSize", type=int, default=512)
     parser.add_argument("--numlayers", dest="numLayers", type=int, default=8)
     parser.add_argument("--numfeatures", dest="numFeatures", type=int, default=500)
     parser.add_argument("--numlayers_hpm", dest="numLayers_hpm", type=int, default=8)
-    parser.add_argument("--numfeatures_hpm", dest="numFeatures_hpm", type=int, default=300)
-    parser.add_argument("--t_ic", dest="t_ic", type=float, default=1e-4)
-    parser.add_argument("--t_pde", dest="t_pde", type=float, default=1e-7)
+    parser.add_argument("--numfeatures_hpm", dest="numFeatures_hpm", type=int, default=500)
+    parser.add_argument("--t_ic", dest="t_ic", type=float, default=4e-3)
+    parser.add_argument("--t_pde", dest="t_pde", type=float, default=1e-5)
     parser.add_argument("--pretraining", dest="pretraining", type=int, default=1)
-    parser.add_argument("--maxFrames", dest="maxFrames", type=int, default=500)
-    parser.add_argument("--subsampleFactor", dest="subsampleFactor", type=int, default=1)
+    parser.add_argument("--frameStep", dest="frameStep", type=float, default=3)
+    parser.add_argument("--nt", dest="nt", type=int, default=3000)
+    parser.add_argument("--lr", dest="lr", type=float, default=1e-5)
     args = parser.parse_args()
-
+    
     if hvd.rank() == 0:
+        
         print("-" * 10 + "-" * len(args.identifier) + "-" * 10)
         print("-" * 10 + args.identifier + "-" * 10)
         print("-" * 10 + "-" * len(args.identifier) + "-" * 10)
@@ -239,48 +175,59 @@ if __name__ == "__main__":
     coordinateSystem = getDefaults(args)
     
     modelPath = 'results/models/' + args.identifier + '/'
-    logdir = 'results/experiments/' + args.identifier + '/'
     useGPU = True
     activation = torch.tanh
 
     # create modelpath
     if hvd.rank() == 0:
         pathlib.Path(modelPath).mkdir(parents=True, exist_ok=True)
-        # create logWriter
-    log_writer = SummaryWriter(logdir) if hvd.rank() == 0 else None
-
+  
     # create dataset
-    ds = HeatEquationHPMDataset(args.pData, coordinateSystem, args.batchsize, shuffle=True, useGPU=True, maxFrames = args.maxFrames, subsampleFactor = args.subsampleFactor)
+    ds = HeatEquationHPMDataset(args.pData, coordinateSystem, args.batchSize, args.numBatches, shuffle=True, useGPU=True, frameStep = args.frameStep, frames = [])
     # Partition dataset among workers using DistributedSampler
     train_sampler = torch.utils.data.distributed.DistributedSampler(ds, num_replicas=hvd.size(), rank=hvd.rank())
     train_loader = torch.utils.data.DataLoader(ds, batch_size=1, sampler=train_sampler)
 
     model = HeatEquationHPMNet(args.numLayers, args.numFeatures, args.numLayers_hpm, args.numFeatures_hpm, ds.lb, ds.ub,
                               5, 5, activation).cuda()
+    
+    # Weights and Biases initialization
+    if hvd.rank() == 0:
+        wandb.init(project="thermal_hpm")
+        wandb.run.name = args.identifier
+        wandb.config.update(args, allow_val_change=True)
+        wandb.watch(model)
 
-    optimizer = optim.Adam(model.parameters(), lr=1e-5)
+    lr = args.lr
+    nframes = int(args.nt//args.frameStep)
+    
+    frames = range(0,args.nt,int(args.frameStep))
+
+    optimizer = optim.Adam(model.parameters(), lr = lr)
     optimizer = hvd.DistributedOptimizer(optimizer,
                                          named_parameters=model.named_parameters(),
                                          backward_passes_per_step=1)
     
+    epoch = 0
+
     if(args.pModel != ""):
         load_checkpoint(model, args.pModel)
-    
+        #epoch = int(args.pModel.split('_')[5].split('.')[0])
+
     # broadcast parameters & optimizer state.
     hvd.broadcast_parameters(model.state_dict(), root_rank=0)
     hvd.broadcast_optimizer_state(optimizer, root_rank=0)
-
-    epoch = 0
-
+    
+    #frequency of logging output: every N epochs
+    log_freq = 50
     if args.pretraining:
         """
         approximate full simulation
         """
         print("Starting pretraining ..")
         l_loss = 1
-        l_loss_0 = 10
         start_time = time.time()
-        while (l_loss > args.t_ic or abs(l_loss_0 - l_loss) > args.t_ic):
+        while (l_loss > args.t_ic):
             epoch += 1
             for x, y, t, Ex_u in train_loader:
                 optimizer.zero_grad()
@@ -288,40 +235,54 @@ if __name__ == "__main__":
                 loss = model.loss_ic(x, y, t, Ex_u)
                 loss.backward()
                 optimizer.step()
-            l_loss_0 = l_loss
+                
             l_loss = loss.item()
-
-            if (epoch % 100 == 0) and log_writer:
-                print("[%d] IC loss: %.4e [%.2fs]" % (epoch, l_loss, time.time() - start_time))
-                log_writer.add_scalar("loss_ic", l_loss, epoch)
-
-                # ValidationLoss needs to be fixed by Szymon.. currently giving wrong numbers.
-                writeValidationLoss(0, model, epoch, log_writer, coordinateSystem, identifier="PT")
-                writeIntermediateState(0, model, epoch, log_writer, coordinateSystem, identifier="PT")
-                writeValidationLoss(500, model, epoch, log_writer, coordinateSystem, identifier="PT")
-                writeIntermediateState(500, model, epoch, log_writer, coordinateSystem, identifier="PT")
-                writeValidationLoss(1000, model, epoch, log_writer, coordinateSystem, identifier="PT")
-                writeIntermediateState(1000, model, epoch, log_writer, coordinateSystem, identifier="PT")
-
-                save_checkpoint(model, modelPath + "0_ic/", epoch)
-
+ 
+            if (epoch % log_freq == 0):
+                
+                if hvd.rank() == 0:
+                    
+                    print("[%d] IC loss: %.4e [%.2fs]" % (epoch, l_loss, time.time() - start_time))
+                    
+                    # arrays with average predicted and exact temperatures for multiple frames
+                    temp, temp_pr = temp_comp(model, args, ds, coordinateSystem, args.nt, int(args.frameStep))
+		    
+		    # mean square error
+                    mse1 = mse(model, args, ds, coordinateSystem)
+                    
+                    # model produces snapshots at the beginning, middle and end of time span 
+                    for i in [0, len(frames)//2, -1]:
+                        img = model_snapshot(model, args, frames[i], ds, coordinateSystem)
+                        plot = plt.imshow(img)
+                        wandb.log({"frame " + str(frames[i]): plot, "epoch": epoch})
+                        plt.clf()
+			
+		    # table with average predicted and exact temperatures for multiple frames
+                    data = [[label, val1, val2] for (label, val1, val2) in zip(frames, temp, temp_pr)]
+                    table = wandb.Table(data=data, columns = ["frame", "Mean temperature exact", "Mean temperature predicted"])
+                    
+                    wandb.log({"My table": table, "number of frames": nframes, "MSE": mse1, "train loss": l_loss, "epoch": epoch, "learning rate": lr})
+             
+            if (epoch % 100 == 0) and hvd.rank() == 0:
+	        wandb.save(args.identifier + '_ic_' + str(epoch) + '.pt')
+    
     if args.pretraining:
         save_checkpoint(model, modelPath + "0_ic/", epoch)
+        if hvd.rank() == 0:
+            wandb.save(args.identifier + '_ic_' + str(epoch) + '.pt')
         
-
-    """
-    learn non-linear operator N 
-    """
+    #learn non-linear operator N 
+    
     # we need to significantly reduce the learning rate [default: 9e-6]
     for paramGroup in optimizer.param_groups:
-        paramGroup['lr'] = 1e-7
+        paramGroup['lr'] = 5e-7
 
     l_loss = 1
+    epoch = 0
     start_time = time.time()
     while (l_loss > args.t_pde):
         epoch += 1
         for x, y, t, Ex_u in train_loader:
-            # for x, y, t, Ex_u, Ex_v in train_loader:
             optimizer.zero_grad()
             hpmLoss,interpolLoss = model.hpm_loss(x,
                                   y,
@@ -334,32 +295,18 @@ if __name__ == "__main__":
         l_loss = loss.item()
         h_loss = hpmLoss.item()
         i_loss = interpolLoss.item()
-        if (epoch % 100 == 0) and log_writer:
-            #lambda_u_xx, lambda_u_yy, diff_u = model.get_params(x, y, t)
-            # lambda_v_xx, lambda_v_yy, lambda_u_xx, lambda_u_yy, diff_u, diff_v = model.get_params(x, y, t)
-            # log_writer.add_scalar("lambda_v_xx", lambda_v_xx, epoch)
-            # log_writer.add_scalar("lambda_v_yy", lambda_v_yy, epoch)
-            #og_writer.add_scalar("lambda_u_xx", lambda_u_xx, epoch)
-            #log_writer.add_scalar("diff_u_t", diff_u, epoch)
-            # log_writer.add_scalar("diff_v_t", diff_v, epoch)
-            log_writer.add_scalar("hpm_loss", h_loss, epoch)
-            log_writer.add_scalar("interpol_loss", i_loss, epoch)
+        if (epoch % log_freq == 0):
+            if hvd.rank() == 0:
 
-            print("[%d] PDE loss: %.4e %.4e [%.2fs] saved" % (epoch, h_loss, i_loss, time.time() - start_time))
+                mse1 = mse(model, args, ds, coordinateSystem)
+                wandb.log({"Train loss HPM": l_loss, "hpmLoss": h_loss, "interpolLoss": i_loss, "epoch": epoch, "MSE": mse1})
 
-            #writeIntermediateState(0, model, epoch, log_writer, coordinateSystem, identifier="PDE")
-            #writeIntermediateState(500, model, epoch, log_writer, coordinateSystem, identifier="PDE")
-            #writeIntermediateState(1000, model, epoch, log_writer, coordinateSystem, identifier="PDE")
+                print("[%d] PDE loss: %.4e %.4e [%.2fs] saved" % (epoch, h_loss, i_loss, time.time() - start_time))
 
-            #writeValidationLoss(0, model, epoch, log_writer, coordinateSystem, identifier="PDE")
-            #writeValidationLoss(500, model, epoch, log_writer, coordinateSystem, identifier="PDE")
-            #writeValidationLoss(1000, model, epoch, log_writer, coordinateSystem, identifier="PDE")
-
-            #sys.stdout.flush()
-
-            #log_writer.add_histogram('First Layer Grads', model.lin_layers_hpm[0].weight.grad.view(-1, 1), epoch)
-
-            save_checkpoint(model, modelPath + "1_pde/", epoch)
+                if (epoch % 100 == 0):
+                    save_checkpoint(model, modelPath + "1_pde/", epoch)
 
     save_checkpoint(model, modelPath + "1_pde/", epoch)
-    print("--- converged ---")
+    
+    if hvd.rank() == 0:
+        print("--- converged ---")
