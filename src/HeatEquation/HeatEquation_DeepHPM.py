@@ -89,10 +89,6 @@ class HeatEquationHPMNet(HeatEquationBaseNet):
 
         x = x.view(-1)
         y = y.view(-1)
-        
-        u_x = (u_x - (-54))/(49 - (-54))
-        u_y = (u_y - (-73))/(61 - (-73))
-        u_t = (u_t - (-5.5))/(9.5 - (-5.5))
 
         X = torch.stack([x,y,u,u_x,u_y,u_xx,u_yy], 1) #change parameters, Temperature, coordinates 
         f = u_t - self.forward_hpm(X)
