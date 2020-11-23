@@ -44,13 +44,13 @@ class SchrodingerEquationDataset(Dataset):
         return posX, posY, posT
 
     @staticmethod
-    def getInput(tpoint, csystem, args):
+    def getInput(tpoint, csystem, pData):
         """
         get the input for a specifiy point t 
         this function returns a list of grid points appended with time t
         """
-        hf = h5py.File(args.pData + str(tpoint) + '.h5', 'r')
-        t = np.array(hf['timing'][0])
+        hf = h5py.File(pData + str(tpoint) + '.h5', 'r')
+        t = np.array(hf['timing'][0])/csystem['t_ub']
         hf.close()
         
         posX, posY = SchrodingerEquationDataset.get2DGrid(csystem["nx"],csystem["ny"])
@@ -78,8 +78,7 @@ class SchrodingerEquationDataset(Dataset):
     def getFrame(timepoint, csystem, omega = 1):
         posX, posY, posT = SchrodingerEquationDataset.getInput(timepoint, csystem)
         Exact = SchrodingerAnalytical.Psi(posX, posY, posT, f=omega)
-        return Exact.real, Exact.imag
-                                  
+        return Exact.real, Exact.imag                                
 
     def __init__(self, cSystem, energySamplingX, energySamplingY, initSize, numBatches, batchSizePDE, useGPU=True, randomICpoints = True):
         self.lb = np.array([cSystem["x_lb"], cSystem["y_lb"], 0.])
@@ -133,7 +132,6 @@ class SchrodingerEquationDataset(Dataset):
         self.fbu0 = self.dtype(Exact.real)
         self.fbv0 = self.dtype(Exact.imag)
       
-        
     def __getitem__(self, index):
         # generate batch for inital solution
 
@@ -157,17 +155,13 @@ class HeatEquationHPMDataset(SchrodingerEquationDataset):
     
     @staticmethod
     def segmentation(pFile, step, threshold = 31):
-        """
-        Function to partition a snapshot into brain and non-brain parts
-        It returns a mask with ones for brain part and zeros for non-brain part.
-        """
     
         hf = h5py.File(pFile + str(step) + '.h5', 'r')
         value = np.array(hf['seq'][:])
         hf.close()
     
         value = np.array(value).reshape(-1)
-        value = value.reshape((640,480)).T
+        value = value.reshape(640,480)
         
         elevation_map = sobel(value)
         markers = np.zeros_like(value)
@@ -192,50 +186,44 @@ class HeatEquationHPMDataset(SchrodingerEquationDataset):
        
         return value, timing
     
-    def __init__(self, pData, cSystem, batchSize, numBatches, frameStep, shuffle=True, useGPU=True, frames=[]):
-
-        # Load data for t0
-        self.lb = np.array([cSystem["x_lb"], cSystem["y_lb"], 0.])
-        self.ub = np.array([cSystem["x_ub"], cSystem["y_ub"], cSystem["tmax"]])
-        nt = cSystem["nt"]
-        
-        frameStep = int(frameStep)
-        
-        # equidistant frames are taken if particular frames aren't given
-        if len(frames) == 0:
-            frames = range(0,nt,frameStep)
-            #nframes = np.random.RandomState(seed=1234).permutation(nt)[0:int(nt//frameStep)] 
-            
-        x,y,t = SchrodingerEquationDataset.get3DGrid(nt, 640,480)
-        
+    def __init__(self, pData, batchSize, numBatches, frameStep, nt, shuffle=True, useGPU=True):
+                  
         self.u = []
         self.x = []
         self.y = []
         self.t = []
         
-        # same mask as for t = 0 is created for all time steps
+        hf = h5py.File(pData + str(nt-1) + '.h5', 'r')
+        tmax = np.array(hf['timing'][0])
+        hf.close()
+        
+        nx = 640 
+        ny = 480
+        xmin = 0
+        xmax = 1
+        ymin = 0
+        ymax = 1
+        dt = 1
+                
         seg_matrix = self.segmentation(pData, 0)
         
-        for step in frames:
+        for step in range(0,nt,frameStep):
             Exact_u, timing = self.loadFrame(pData, step)
             #seg_matrix = self.segmentation(pData, step)
-            Exact_u = Exact_u.reshape(640,480)*seg_matrix.T
+            Exact_u = Exact_u.reshape(nx,ny)*seg_matrix
             for xi in range(640):
                 for yi in range(480):
-                    if Exact_u[xi,yi] != 0: # exclude non-brain pixels
+                    if Exact_u[xi,yi] != 0:
                         self.u.append(Exact_u[xi,yi])
                         self.x.append(xi)
                         self.y.append(yi)
-                        self.t.append(timing)
-            del Exact_u, timing               
-
+                        self.t.append(timing)          
+         
         self.u = np.array(self.u).reshape(-1)
         self.x = np.array(self.x).reshape(-1)
         self.y = np.array(self.y).reshape(-1)
         self.t = np.array(self.t).reshape(-1)
-        
-        self.x,self.y,_ = SchrodingerEquationDataset.pixelToCoordinate(self.x, self.y, self.t, cSystem)
-               
+                       
         # sometimes we are loading less files than we specified by batchsize + numBatches 
         # => adapt numBatches to real number of batches for avoiding empty batches
         self.batchSize = batchSize
@@ -245,7 +233,18 @@ class HeatEquationHPMDataset(SchrodingerEquationDataset):
         self.numBatches = self.numSamples // self.batchSize
         print("numBatches: %d" % (self.numBatches)) 
         self.randomState = np.random.RandomState(seed=1234)
-        # Domain bounds
+                
+        self.coordinateSystem = {"x_lb": xmin, "x_ub": xmax, "y_lb": ymin, "y_ub" : ymax, "nx":nx , "ny":ny, "dt": dt, "nt": nt, 't_lb': 0, 't_ub': tmax} #, 'u_lb': min(self.u), 'u_ub': max(self.u)}
+        
+        self.lb = np.array([0., 0., 0.])
+        self.ub = np.array([1., 1., 1.])
+
+        # normalization to [0,1]
+        
+        self.x = self.x/(nx-1)
+        self.y = self.y/(ny-1)
+        self.t = self.t/(tmax)
+        #self.u = (self.u - min(self.u))/(max(self.u) - min(self.u))
 
         if (useGPU):
             self.dtype = torch.cuda.FloatTensor

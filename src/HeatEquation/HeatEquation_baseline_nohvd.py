@@ -8,8 +8,9 @@ import torch.optim as optim
 import scipy.io
 from torch.autograd import Variable
 import torch.optim as optim
+import torch.nn.functional as F
 from enum import Enum
-from UKDDataset_segm_upd import SchrodingerEquationDataset
+from UKDDataset_segm_upd_norm import SchrodingerEquationDataset
 import matplotlib.pyplot as plt
 import torch.utils.data.distributed
 from tensorboardX import SummaryWriter
@@ -18,12 +19,11 @@ import os
 import sys
 import pathlib
 
-def model_snapshot(model, args, timeStep, dataset, csystem):
-    """
-    Function returns approximation of the solution for a time step
-    """
-    seg_matrix = dataset.segmentation(args.pData, 0)
-    x,y,t = dataset.getInput(timeStep, csystem, args)
+def model_snapshot(model, pData, timeStep, dataset):
+    seg_matrix = dataset.segmentation(pData, 0)
+    
+    x,y,t = dataset.getInput(timeStep, dataset.coordinateSystem, pData)
+    
     x = torch.Tensor(x).float().cuda()
     y = torch.Tensor(y).float().cuda()
     t = torch.Tensor(t).float().cuda()        
@@ -33,26 +33,23 @@ def model_snapshot(model, args, timeStep, dataset, csystem):
 
     X = torch.stack([x, y, t], 1)
 
-    UV = model.forward(X)
+    U = model.forward(X).detach().cpu().numpy()
+    #U = U*(dataset.coordinateSystem['u_ub'] - dataset.coordinateSystem['u_lb']) + dataset.coordinateSystem['u_lb']
     
-    return (UV.detach().cpu().numpy().reshape(480,640))*seg_matrix
+    return (U.reshape(480,640))*seg_matrix.T
 
-def real_snapshot(args, timeStep, dataset):
-    """
-    Function returns exact data for a time step
-    """
-    seg_matrix = dataset.segmentation(args.pData, 0)
-    return dataset.loadFrame(args.pData, timeStep)[0].reshape(640,480).T*seg_matrix
+def real_snapshot(pData, timeStep, dataset):
 
-def temp_comp(model, args, dataset, csystem, nt, frameStep):
-    """
-    Function calculates arrays of average exact temperature as well as predicted one for multiple time steps
-    """
-    temp = [] # exact
-    temp_pr = [] # predicted
+    seg_matrix = dataset.segmentation(pData, 0)
+    U = dataset.loadFrame(pData, timeStep)[0]
+    return U.reshape(640,480).T*seg_matrix.T
+
+def temp_comp(model, pData, dataset, nt, frameStep):
+    temp = []
+    temp_pr = []
     for i in range(0,nt,int(frameStep)):
-        mT = model_snapshot(model, args, i, dataset, csystem).reshape(-1)
-        rT = real_snapshot(args, i, dataset).reshape(-1)
+        mT = model_snapshot(model, pData, i, dataset).reshape(-1)
+        rT = real_snapshot(pData, i, dataset).reshape(-1)
         
         mT = mT[mT != 0]
         rT = rT[rT != 0]
@@ -65,15 +62,12 @@ def temp_comp(model, args, dataset, csystem, nt, frameStep):
         
     return temp, temp_pr
 
-def mse(model, args, dataset, csystem):
-    """
-    Function calculates mean square error for exact and predicted temperature
-    """
+def mse(model, pData, dataset):
     data = np.array([])
     prediction = np.array([])
-    for i in range(0,3000,25):
-        mT = model_snapshot(model, args, i, dataset, csystem).reshape(-1)
-        rT = real_snapshot(args, i, dataset).reshape(-1)
+    for i in range(0,3000,10):
+        mT = model_snapshot(model, pData, i, dataset).reshape(-1)
+        rT = real_snapshot(pData, i, dataset).reshape(-1)
 
         mT = mT[mT != 0]
         rT = rT[rT != 0]
@@ -85,41 +79,23 @@ def mse(model, args, dataset, csystem):
     
     return mse
 
-
-def valLoss(model, dataset, timeStep, csystem, args):
+def valLoss(model, dataset, timeStep, pData):
     
-    seg_matrix = dataset.segmentation(args.pData, timeStep)
-    
-    x, y, t = dataset.getInput(timeStep, csystem, args)
-    x = torch.Tensor(x).float().cuda()
-    y = torch.Tensor(y).float().cuda()
-    t = torch.Tensor(t).float().cuda()
+    mT = model_snapshot(model, pData, timeStep, dataset).reshape(-1)
+    rT = real_snapshot(pData, timeStep, dataset).reshape(-1)
 
-    inputX = torch.stack([x, y, t], 1)
-    UV = model.forward(inputX).detach().cpu().numpy()
-    uPred = UV[:, 0].reshape(-1)
-    uPred = (uPred.reshape((480,640))*seg_matrix).reshape(-1)
-
-    # load label data
-    uVal,_ = dataset.loadFrame(args.pData, timeStep)
-    uVal = np.array(uVal).reshape(-1)
-    uVal = (uVal.reshape((640,480)).T*seg_matrix).reshape(-1)
-
-    valLoss_u = np.max(abs(uVal - uPred)) 
-    valSqLoss_u = np.sqrt(np.sum(np.power(uVal - uPred,2)))
+    valLoss_u = np.max(abs(mT - rT)) 
+    valSqLoss_u = np.sqrt(np.sum(np.power(mT - rT,2)))
 
     return valLoss_u, valSqLoss_u
     
-def check(model, dataset, csystem, args):
-    """
-    Function returns square and infinity norm values for miltiple frames as well as frames sorted by square norm value
-    Can be used for re-initialization of dataset
-    """
+def check(model, dataset, csystem, nt, frameStep):
+    
     norms_sq = []
     norms_inf = []
-    for i in range(0, args.nt, int(args.frameStep)):
+    for i in range(0, nt, frameStep):
     #for i in range(args.nt):
-        valLoss_u, valSqLoss_u = valLoss(model, dataset, i,csystem, args)
+        valLoss_u, valSqLoss_u = valLoss(model, dataset, i, pData)
         norms_sq.append(valSqLoss_u)
         norms_inf.append(valLoss_u)
     
@@ -137,7 +113,6 @@ def save_checkpoint(model, path, epoch):
     torch.save(state, path + 'model_' + str(epoch)+'.pt')
     print("saving model to ---> %s" % (path + 'model_' + str(epoch)+'.pt'))
 
-    
 def load_checkpoint(model, path):
     device = torch.device('cpu')
     checkpoint = torch.load(path, map_location=device)
@@ -196,23 +171,21 @@ class HeatEquationBaseNet(nn.Module):
         for _ in range(self.noLayers):
             self.in_t.append(nn.Linear(self.noFeatures, self.noFeatures))
         self.in_t.append(nn.Linear(self.noFeatures,1))
-
-        
+       
         for m in self.in_t:
             if isinstance(m, nn.Linear):
                 nn.init.xavier_normal_(m.weight)
                 nn.init.constant_(m.bias, 0)
 
     def forward(self, x):
-        # scale spatiotemporral coordinates to [-1,1]
-        t_in = (x - self.lb)/(self.ub - self.lb)
-        t_in = 2.0 * t_in - 1.0
         for i in range(len(self.in_t)-1):
-            t_in = self.in_t[i](t_in)
-            t_in = self.activation(t_in)
-        return self.in_t[-1](t_in)
+            x = self.in_t[i](x)
+            x = self.activation(x)
+        output = self.in_t[-1](x)
+        #scale to [0,1]
+        output = output*(35.421-27.96) + 27.96
+        return output
                 
-
     def net_uv(self, x, y, t):
         """
         Function that calculates the nn output at postion (x,y) at time t
@@ -231,8 +204,7 @@ class HeatEquationBaseNet(nn.Module):
 
         X = torch.stack([x, y, t], 1)
 
-        UV = self.forward(X)
-        u = UV[:, 0]
+        u = (self.forward(X)).reshape(-1)
         grads = torch.ones([dim]).cuda()
 
         # huge change to the tensorflow implementation this function returns all neccessary gradients
@@ -251,7 +223,7 @@ class HeatEquationBaseNet(nn.Module):
 
         return u, u_x, u_y, u_xx, u_yy, u_t
     
-    def loss_ic(self, x, y, t, u0, filewriter=None, epoch = 0, w_ssim = 0):
+    def loss_ic(self, x, y, t, u0):
         """
         Returns the quality of the net
         """
