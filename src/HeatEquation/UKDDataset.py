@@ -2,6 +2,7 @@ from torch.utils.data import Dataset
 import numpy as np
 import torch
 import os
+from skimage.restoration import denoise_bilateral 
 import h5py
 import SchrodingerAnalytical as SchrodingerAnalytical
 from skimage.filters import sobel
@@ -50,7 +51,7 @@ class SchrodingerEquationDataset(Dataset):
         this function returns a list of grid points appended with time t
         """
         hf = h5py.File(pData + str(tpoint) + '.h5', 'r')
-        t = np.array(hf['timing'][0])/csystem['t_ub']
+        t = np.array(hf['timing'][0])
         hf.close()
         
         posX, posY = SchrodingerEquationDataset.get2DGrid(csystem["nx"],csystem["ny"])
@@ -58,7 +59,9 @@ class SchrodingerEquationDataset(Dataset):
         size = posX.shape[0]
         posT = np.zeros(size) + t
         
-        posX, posY, _ = SchrodingerEquationDataset.pixelToCoordinate(posX, posY,posT,csystem)
+        #posX, posY, _ = SchrodingerEquationDataset.pixelToCoordinate(posX, posY,posT,csystem)
+        posX = posX*0.25
+        posY = posY*0.25
         
         return posX, posY, posT
     
@@ -154,14 +157,17 @@ class SchrodingerEquationDataset(Dataset):
 class HeatEquationHPMDataset(SchrodingerEquationDataset):
     
     @staticmethod
-    def segmentation(pFile, step, threshold = 31):
+    def segmentation(pFile, step, threshold = 32.4):
     
         hf = h5py.File(pFile + str(step) + '.h5', 'r')
         value = np.array(hf['seq'][:])
         hf.close()
-    
+
         value = np.array(value).reshape(-1)
         value = value.reshape(640,480)
+        
+        #bilateral filter + 32.4 threshold lead to 80 percent decrease of data actually used
+        value = denoise_bilateral(value, sigma_color=5, sigma_spatial=5, multichannel=False)
         
         elevation_map = sobel(value)
         markers = np.zeros_like(value)
@@ -181,13 +187,14 @@ class HeatEquationHPMDataset(SchrodingerEquationDataset):
 
         hf = h5py.File(pFile + str(step) + '.h5', 'r')
         value = np.array(hf['seq'][:])
+        
         timing = np.array(hf['timing'][:])
         hf.close()
        
         return value, timing
     
-    def __init__(self, pData, batchSize, numBatches, frameStep, nt, shuffle=True, useGPU=True):
-                  
+    def __init__(self, pData, batchSize, numBatches, frameStep, nt, spatialStep = 1, shuffle=True, useGPU=True):
+                
         self.u = []
         self.x = []
         self.y = []
@@ -208,11 +215,12 @@ class HeatEquationHPMDataset(SchrodingerEquationDataset):
         seg_matrix = self.segmentation(pData, 0)
         
         for step in range(0,nt,frameStep):
+            
             Exact_u, timing = self.loadFrame(pData, step)
-            #seg_matrix = self.segmentation(pData, step)
             Exact_u = Exact_u.reshape(nx,ny)*seg_matrix
-            for xi in range(640):
-                for yi in range(480):
+            
+            for xi in range(0,640,spatialStep):
+                for yi in range(0,480,spatialStep):
                     if Exact_u[xi,yi] != 0:
                         self.u.append(Exact_u[xi,yi])
                         self.x.append(xi)
@@ -234,17 +242,16 @@ class HeatEquationHPMDataset(SchrodingerEquationDataset):
         print("numBatches: %d" % (self.numBatches)) 
         self.randomState = np.random.RandomState(seed=1234)
                 
-        self.coordinateSystem = {"x_lb": xmin, "x_ub": xmax, "y_lb": ymin, "y_ub" : ymax, "nx":nx , "ny":ny, "dt": dt, "nt": nt, 't_lb': 0, 't_ub': tmax} #, 'u_lb': min(self.u), 'u_ub': max(self.u)}
+        self.coordinateSystem = {"x_lb": xmin, "x_ub": xmax, "y_lb": ymin, "y_ub" : ymax, "nx":nx , "ny":ny, "dt": dt, "nt": nt} #, 't_lb': 0, 't_ub': tmax} #, 'u_lb': min(self.u), 'u_ub': max(self.u)}
         
-        self.lb = np.array([0., 0., 0.])
-        self.ub = np.array([1., 1., 1.])
-
-        # normalization to [0,1]
+        # normalization of pixels to mm
         
-        self.x = self.x/(nx-1)
-        self.y = self.y/(ny-1)
-        self.t = self.t/(tmax)
+        self.x = self.x*0.25
+        self.y = self.y*0.25
         #self.u = (self.u - min(self.u))/(max(self.u) - min(self.u))
+        
+        self.lb = np.array([self.x.min(), self.y.min(), self.t.min()])
+        self.ub = np.array([self.x.max(), self.y.max(), self.t.max()])
 
         if (useGPU):
             self.dtype = torch.cuda.FloatTensor
@@ -283,3 +290,84 @@ class HeatEquationHPMDataset(SchrodingerEquationDataset):
 
     def __len__(self):
         return self.numBatches
+    
+class dHeatEquationHPMDataset(HeatEquationHPMDataset):
+    def __init__(self, model, pData, batchSize, numBatches, frameStep, nt, spatSize = 4, shuffle=True, useGPU=True):
+        super().__init__(pData = pData, batchSize = batchSize, numBatches = numBatches, frameStep = frameStep, nt = nt, spatialStep = 1, shuffle = shuffle, useGPU = useGPU)
+        
+        size = self.x.size()[0]
+        
+        self.u_x = np.zeros(size)
+        self.u_y = np.zeros(size)
+        self.u_xx = np.zeros(size)
+        self.u_yy = np.zeros(size)
+        self.u_t = np.zeros(size)
+              
+        n = batchSize
+        for i in range (size//n):
+
+            _u, u_x, u_y, u_xx, u_yy, u_t = model.net_uv(self.x[(n*i):(n*(i+1))], self.y[(n*i):(n*(i+1))], self.t[(n*i):(n*(i+1))])
+            
+            self.u_x[(n*i):(n*(i+1))] = u_x.cpu().detach().numpy()
+            self.u_y[(n*i):(n*(i+1))] = u_y.cpu().detach().numpy()
+            self.u_xx[(n*i):(n*(i+1))] = u_xx.cpu().detach().numpy()
+            self.u_yy[(n*i):(n*(i+1))] = u_yy.cpu().detach().numpy()
+            self.u_t[(n*i):(n*(i+1))] = u_t.cpu().detach().numpy()
+            
+        self.x = self.x.cpu().detach().numpy()
+        self.y = self.y.cpu().detach().numpy()
+        self.t = self.t.cpu().detach().numpy()
+        self.u = self.u.cpu().detach().numpy()
+                    
+        #self.dlb = np.array([self.x.min(), self.y.min(), self.t.min(), self.u.min(), self.u_x.min(), self.u_y.min(), self.u_xx.min(), self.u_yy.min()])
+        #self.dub = np.array([self.x.max(), self.y.max(), self.t.max(), self.u.max(), self.u_x.max(), self.u_y.max(), self.u_xx.max(), self.u_yy.max()])
+        
+        if (useGPU):
+            self.dtype = torch.cuda.FloatTensor
+            self.dtype2 = torch.cuda.LongTensor
+        else:
+            self.dtype = torch.FloatTensor
+            self.dtype2 = torch.LongTensor
+            
+        if shuffle:
+            # this function shuffles the whole dataset
+
+            # generate random permutation idx
+
+            randIdx = self.randomState.permutation(self.x.shape[0])
+
+            # use random index
+            self.x = self.x[randIdx]
+            self.y = self.y[randIdx]
+            self.t = self.t[randIdx]
+            self.u = self.u[randIdx]
+            self.u_x = self.u_x[randIdx]
+            self.u_y = self.u_y[randIdx]
+            self.u_t = self.u_t[randIdx]
+            self.u_xx = self.u_xx[randIdx]
+            self.u_yy = self.u_yy[randIdx]
+            #self.v = self.v[randIdx]
+
+        # sclice the array for training
+        self.x = self.dtype(self.x[:self.numSamples])
+        self.y = self.dtype(self.y[:self.numSamples])
+        self.t = self.dtype(self.t[:self.numSamples])
+        self.u = self.dtype(self.u[:self.numSamples])
+        self.u_x = self.dtype(self.u_x[:self.numSamples])
+        self.u_y = self.dtype(self.u_y[:self.numSamples])
+        self.u_t = self.dtype(self.u_t[:self.numSamples])
+        self.u_xx = self.dtype(self.u_xx[:self.numSamples])
+        self.u_yy = self.dtype(self.u_yy[:self.numSamples])
+           
+    def __getitem__(self, index):
+
+        x = (self.x[index * self.batchSize: (index + 1) * self.batchSize])
+        y = (self.y[index * self.batchSize: (index + 1) * self.batchSize])
+        t = (self.t[index * self.batchSize: (index + 1) * self.batchSize])
+        u = (self.u[index * self.batchSize: (index + 1) * self.batchSize])
+        u_x = (self.u_x[index * self.batchSize: (index + 1) * self.batchSize])
+        u_y = (self.u_y[index * self.batchSize: (index + 1) * self.batchSize])
+        u_xx = (self.u_xx[index * self.batchSize: (index + 1) * self.batchSize])
+        u_yy = (self.u_yy[index * self.batchSize: (index + 1) * self.batchSize])
+        u_t = (self.u_t[index * self.batchSize: (index + 1) * self.batchSize])     
+        return x, y, t, u , u_x, u_y, u_xx, u_yy, u_t    

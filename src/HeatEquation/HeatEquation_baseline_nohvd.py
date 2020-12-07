@@ -13,7 +13,6 @@ from enum import Enum
 from UKDDataset_segm_upd_norm import SchrodingerEquationDataset
 import matplotlib.pyplot as plt
 import torch.utils.data.distributed
-from tensorboardX import SummaryWriter
 from argparse import ArgumentParser
 import os
 import sys
@@ -65,7 +64,7 @@ def temp_comp(model, pData, dataset, nt, frameStep):
 def mse(model, pData, dataset):
     data = np.array([])
     prediction = np.array([])
-    for i in range(0,3000,10):
+    for i in range(0,1000,10):
         mT = model_snapshot(model, pData, i, dataset).reshape(-1)
         rT = real_snapshot(pData, i, dataset).reshape(-1)
 
@@ -178,6 +177,8 @@ class HeatEquationBaseNet(nn.Module):
                 nn.init.constant_(m.bias, 0)
 
     def forward(self, x):
+        #scale spatiotemporal coordinates to [0,1]
+        t_in = (x - self.lb)/(self.ub - self.lb)
         for i in range(len(self.in_t)-1):
             x = self.in_t[i](x)
             x = self.activation(x)
