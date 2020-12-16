@@ -23,7 +23,7 @@ import os
 import h5py
 
 class HeatEquationHPMNet(HeatEquationBaseNet):
-    def __init__(self, numLayers, numFeatures, numLayers_alpha, numFeatures_alpha, numLayers_hs, numFeatures_hs, lb, ub, samplingX, samplingY, activation=torch.tanh, activation_alpha=F.leaky_relu , activation_hs=F.leaky_relu):
+    def __init__(self, numLayers, numFeatures, numLayers_alpha, numFeatures_alpha, numLayers_hs, numFeatures_hs, lb, ub, samplingX, samplingY, activation=torch.tanh, activation_alpha=F.leaky_relu , activation_hs=F.leaky_relu, scalingConstant = 200):
         """
         This function creates the components of the Neural Network and saves the datasets
         :param x0: Position x at time zero
@@ -48,6 +48,7 @@ class HeatEquationHPMNet(HeatEquationBaseNet):
         self.noFeatures_hs = numFeatures_hs
         self.lin_layers_hs = nn.ModuleList()
         self.activation_hs = activation_hs
+        self.scalingConstant = scalingConstant
         
         self.lb = torch.Tensor(lb).float().cuda()
         self.ub = torch.Tensor(ub).float().cuda()
@@ -65,7 +66,7 @@ class HeatEquationHPMNet(HeatEquationBaseNet):
         :return:
         """
 
-        self.lin_layers_alpha.append(nn.Linear(2, self.noFeatures_alpha))
+        self.lin_layers_alpha.append(nn.Linear(3, self.noFeatures_alpha))
         for _ in range(self.noLayers_alpha):
             self.lin_layers_alpha.append(nn.Linear(self.noFeatures_alpha, self.noFeatures_alpha))
         self.lin_layers_alpha.append(nn.Linear(self.noFeatures_alpha, 1))
@@ -82,7 +83,7 @@ class HeatEquationHPMNet(HeatEquationBaseNet):
         :return:
         """
 
-        self.lin_layers_hs.append(nn.Linear(2, self.noFeatures_hs))
+        self.lin_layers_hs.append(nn.Linear(3, self.noFeatures_hs))
         for _ in range(self.noLayers_hs):
             self.lin_layers_hs.append(nn.Linear(self.noFeatures_hs, self.noFeatures_hs))
         self.lin_layers_hs.append(nn.Linear(self.noFeatures_hs, 1))
@@ -93,21 +94,24 @@ class HeatEquationHPMNet(HeatEquationBaseNet):
                 nn.init.constant_(m.bias, 0)
     
     def forward_alpha(self, t_in):
+        t_in = (t_in - self.lb)/(self.ub - self.lb)
         for i in range(0, len(self.lin_layers_alpha) - 1):
             t_in = self.lin_layers_alpha[i](t_in)
             t_in = self.activation_alpha(t_in)
         t_in = self.lin_layers_alpha[-1](t_in)
-        t_in = 0.1 * torch.sigmoid(t_in)
+        
+        #t_in = torch.sigmoid(t_in)
+        #t_in = t_in * self.scalingConstant
+        
         return t_in
         
     def forward_hs(self, x):
-        t_in = (x - self.lb[:-1])/(self.ub[:-1] - self.lb[:-1])
-        t_in = x
+        t_in = (x - self.lb)/(self.ub - self.lb)
         for i in range(0, len(self.lin_layers_hs) - 1):
             t_in = self.lin_layers_hs[i](t_in)
             t_in = self.activation_hs(t_in)
         t_in = self.lin_layers_hs[-1](t_in)
-        t_in = torch.tanh(t_in)
+        #t_in = torch.tanh(t_in)
         return t_in
 
     def net_pde(self, x, y, t, gamma=1.):
@@ -163,19 +167,22 @@ class HeatEquationHPMNet(HeatEquationBaseNet):
 
         return hpmLoss
     """
-    def hpm_loss(self, x, y, u_xx, u_yy, exact_u_t):
+    def hpm_loss(self, x, y, t, u_xx, u_yy, exact_u_t):
         
         x = x.view(-1)
         y = y.view(-1)
+        t = t.view(-1)
 
         u_xx = u_xx.view(-1)
         u_yy = u_yy.view(-1)
         
         exact_u_t = exact_u_t.view(-1)
         
-        X = torch.stack([x,y], 1)         
-        hs = (self.forward_hs(X)).view(-1) #heat source net 
-        alpha = (self.forward_alpha(X)).view(-1) #alpha net
+        X_hs = torch.stack([x,y,t], 1)        
+        hs = (self.forward_hs(X_hs)).view(-1) #heat source net 
+        
+        X_alpha = torch.stack([x,y,t], 1) 
+        alpha = (self.forward_alpha(X_alpha)).view(-1) #alpha net
         
         pred_u_t = alpha*(u_xx+u_yy) + hs
         
