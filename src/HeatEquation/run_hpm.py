@@ -11,9 +11,9 @@ from torch.autograd import Variable
 import torch.optim as optim
 from enum import Enum
 
-from UKDDataset_segm_upd_norm import *
-from HeatEquation_baseline_nohvd_segm_upd_norm import  valLoss, save_checkpoint, load_checkpoint, HeatEquationBaseNet, check, model_snapshot, real_snapshot, temp_comp, mse
-from HeatEquation_DeepHPM_segm_upd_norm import *
+from UKDDataset import *
+from HeatEquation_baseline_nohvd import  valLoss, save_checkpoint, load_checkpoint, HeatEquationBaseNet, check, model_snapshot, real_snapshot, temp_comp, mse
+from HeatEquation_DeepHPM import *
 import matplotlib.pyplot as plt
 import torch.utils.data.distributed
 import horovod.torch as hvd
