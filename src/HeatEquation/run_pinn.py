@@ -120,24 +120,7 @@ if __name__ == "__main__":
         if (epoch % log_freq == 0 and hvd.rank() == 0):
 
             print("[%d] IC loss: %.4e [%.2fs]" % (epoch, l_loss, time.time() - start_time))
-	    
-	    """
-            temp, temp_pr = temp_comp(model, args.pData, ds, args.nt, args.frameStep)
-
-            mse1 = mse(model, args.pData, ds)
-
-            for i in [0, len(nframes)//2, -1]:
-                img = model_snapshot(model, args.pData, nframes[i], ds)
-                plot = plt.imshow(img)
-                wandb.log({"frame " + str(nframes[i]): plot, "epoch": epoch})
-                plt.clf()
-
-            data = [[label, val1, val2] for (label, val1, val2) in zip(nframes, temp, temp_pr)]
-            table = wandb.Table(data=data, columns = ["frame", "Mean temperature exact", "Mean temperature predicted"])
-
-            wandb.log({"My table": table, "MSE": mse1, "train loss": l_loss, "epoch": epoch})
-            """
-            
+	                
             wandb.log({"train loss": l_loss, "epoch": epoch})
 
             save_checkpoint(model, modelPath + "0_ic/", epoch)
