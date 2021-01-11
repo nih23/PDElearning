@@ -10,7 +10,7 @@ from torch.autograd import Variable
 import torch.optim as optim
 import torch.nn.functional as F
 from enum import Enum
-from UKDDataset_segm_upd_norm import SchrodingerEquationDataset
+from UKDDataset import SchrodingerEquationDataset
 import matplotlib.pyplot as plt
 import torch.utils.data.distributed
 from argparse import ArgumentParser
